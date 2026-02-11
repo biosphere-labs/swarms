@@ -32,6 +32,7 @@ from swarms.structs.ma_utils import list_all_agents
 from swarms.structs.majority_voting import MajorityVoting
 from swarms.structs.mixture_of_agents import MixtureOfAgents
 from swarms.structs.multi_agent_router import MultiAgentRouter
+from swarms.structs.parl_orchestrator import PARLOrchestrator
 from swarms.structs.round_robin import RoundRobinSwarm
 from swarms.structs.sequential_workflow import SequentialWorkflow
 from swarms.utils.generate_keys import generate_api_key
@@ -61,6 +62,7 @@ SwarmType = Literal[
     "LLMCouncil",
     "DebateWithJudge",
     "RoundRobin",
+    "PARLOrchestrator",
 ]
 
 
@@ -473,6 +475,7 @@ class SwarmRouter:
             "LLMCouncil": self._create_llm_council,
             "DebateWithJudge": self._create_debate_with_judge,
             "RoundRobin": self._create_round_robin_swarm,
+            "PARLOrchestrator": self._create_parl_orchestrator,
         }
 
     def _create_heavy_swarm(self, *args, **kwargs):
@@ -635,6 +638,25 @@ class SwarmRouter:
             max_loops=self.max_loops,
             verbose=self.verbose,
             return_json_on=self.return_json,
+            *args,
+            **kwargs,
+        )
+
+    def _create_parl_orchestrator(self, *args, **kwargs):
+        """Factory function for PARLOrchestrator."""
+        return PARLOrchestrator(
+            name=self.name,
+            description=self.description,
+            agents=self.agents,
+            max_loops=self.max_loops,
+            # PARL-specific params with sensible defaults
+            orchestrator_model="gpt-4o-mini",
+            sub_agent_model="gpt-4o-mini",
+            max_parallel=10,
+            max_iterations=2,
+            timeout=300,
+            sub_agent_timeout=120,
+            token_budget=100000,
             *args,
             **kwargs,
         )

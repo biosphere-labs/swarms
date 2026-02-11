@@ -85,6 +85,138 @@ The existing framework is used as-is: Agent class, LiteLLM wrapper, tool system,
 - [Unofficial PARL Implementation](https://github.com/The-Swarm-Corporation/PARL) — Reward function and CriticalSteps metric
 - [Kimi System Prompts (extracted)](https://github.com/dnnyngyen/kimi-k2.5-prompts-tools) — Agent architecture analysis
 
+### PARLOrchestrator: Dynamic Task Decomposition & Parallel Execution
+
+The **PARLOrchestrator** is the core addition to this fork. It dynamically analyzes tasks, decomposes them into parallelizable sub-tasks, executes them with isolated context, and synthesizes results—all without predefined workflows.
+
+#### Quick Start: Direct Usage
+
+```python
+from swarms import PARLOrchestrator
+
+# Initialize the orchestrator
+orchestrator = PARLOrchestrator(
+    orchestrator_model="gpt-4o-mini",      # Strong model for decomposition/synthesis
+    sub_agent_model="gpt-4o-mini",         # Can be cheaper/faster
+    max_parallel=8,                         # Max concurrent sub-agents
+    max_iterations=2,                       # Gap-fill iterations
+    timeout=300,                            # Total time budget (seconds)
+)
+
+# Run a task
+result = orchestrator.run(
+    "Research competitor Acme Corp across funding, reviews, pricing, and team"
+)
+print(result)
+```
+
+#### Via SwarmRouter (Universal Orchestrator)
+
+```python
+from swarms import Agent
+from swarms.structs.swarm_router import SwarmRouter, SwarmType
+
+# Define your agents
+research_task = "Research competitor Acme Corp across funding, reviews, pricing, and team"
+
+# Use PARL orchestration
+router = SwarmRouter(
+    swarm_type=SwarmType.PARLOrchestrator,
+    agents=[],  # PARLOrchestrator creates sub-agents dynamically
+)
+
+result = router.run(research_task)
+print(result)
+```
+
+#### Constructor Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | str | `PARLOrchestrator` | Instance name for logging |
+| `description` | str | `PARL-inspired dynamic orchestrator...` | Purpose description |
+| `orchestrator_model` | str | `gpt-4o-mini` | Model for task decomposition & synthesis (use strong model) |
+| `sub_agent_model` | str | `gpt-4o-mini` | Model for sub-agents (can be cheaper/faster) |
+| `max_parallel` | int | `10` | Maximum concurrent sub-agents per cohort |
+| `max_iterations` | int | `2` | Gap-fill iterations (1 = no gap-fill, 2+ = refine) |
+| `timeout` | int | `300` | Total orchestration timeout in seconds |
+| `sub_agent_timeout` | int | `120` | Per-sub-agent timeout in seconds |
+| `token_budget` | int | `100000` | Total token budget across all agents |
+
+#### Architecture & How It Works
+
+The orchestrator executes a six-stage pipeline:
+
+1. **Decomposition** — LLM analyzes the task and produces a sub-task graph with explicit parallelization points
+2. **Scheduling** — Critical-path scheduler orders execution into parallel cohorts (minimizes wall-clock latency)
+3. **Context Sharding** — Each sub-agent receives only relevant context (prevents cross-contamination)
+4. **Parallel Execution** — Sub-tasks within each cohort run concurrently via ThreadPoolExecutor
+5. **Aggregation** — Results are merged with contradiction detection and gap identification
+6. **Iteration** — If gaps found and iterations remain, refocus decomposition on gaps and loop
+
+```
+Task
+  ↓
+DecompositionEngine → "Split into 4 parallel research areas"
+  ↓
+CriticalPathScheduler → "Execute Area-1,2,3,4 in parallel; Area-5 after"
+  ↓
+[Parallel Cohorts] → ContextShardingManager → 4 Sub-Agents (concurrent)
+  ↓
+ResultAggregator → "Synthesize results; found 1 gap"
+  ↓
+If gaps: Refocus on gaps → Iteration 2
+Else: Return final synthesized answer
+```
+
+#### Example: Multi-Aspect Research
+
+```python
+orchestrator = PARLOrchestrator(
+    orchestrator_model="gpt-4o-mini",
+    sub_agent_model="gpt-4o-mini",
+    max_parallel=6,
+)
+
+result = orchestrator.run(
+    "Provide a comprehensive competitive analysis of TechCorp: "
+    "funding history, customer reviews, pricing strategy, executive team, "
+    "market positioning, and recent product launches"
+)
+
+# Orchestrator will:
+# 1. Recognize 6 independent research areas
+# 2. Spawn 6 parallel sub-agents (one per area)
+# 3. Each agent gets focused context: "Research TechCorp's [specific area]"
+# 4. Results synthesized into coherent competitive analysis
+# 5. If contradictions found, flag them; if gaps found, re-decompose
+```
+
+#### Key Capabilities
+
+| Capability | Benefit |
+|-----------|---------|
+| **Dynamic Decomposition** | No predefined workflows; LLM decides parallelization |
+| **Isolated Context** | Each sub-agent gets only relevant information; no token waste |
+| **Critical-Path Aware** | Optimizes latency (wall-clock time), not just throughput |
+| **Gap-Aware Iteration** | If aggregation detects gaps, re-decompose and refine |
+| **Contradiction Flagging** | Identifies conflicting outputs from sub-agents |
+| **Cost-Effective** | Cheap sub-agents + strong orchestrator = ~$0.05 per run |
+
+#### When to Use PARLOrchestrator
+
+- **Wide Research** — "Research X across Y dimensions" (fans out to many parallel agents)
+- **Multi-Document Analysis** — "Analyze these 20 documents for common themes" (each agent handles ~3 docs)
+- **Multi-Aspect Problem-Solving** — Tasks with independent sub-problems (features, bug categories, etc.)
+- **Fact-Checking at Scale** — "Verify these 15 claims" (parallel verification with contradiction detection)
+
+#### Links to Examples
+
+For detailed working examples, see:
+- `examples/parl_orchestrator/basic_research.py` — Wide research with ~6 agents
+- `examples/parl_orchestrator/deep_analysis.py` — Deep analysis with gap-filling
+- `examples/parl_orchestrator/code_review.py` — Multi-file code review in parallel
+
 ### Upstream Sync
 
 ```bash

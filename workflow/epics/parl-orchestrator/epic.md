@@ -2,7 +2,7 @@
 name: parl-orchestrator
 status: backlog
 created: 2026-02-11T20:29:39Z
-updated: 2026-02-11T20:29:39Z
+updated: 2026-02-11T21:01:30Z
 progress: 0%
 prd: none
 github: https://github.com/biosphere-labs/swarms/issues/1
@@ -104,6 +104,23 @@ Add a PARL-inspired dynamic orchestration layer to kyegomez/swarms that decompos
 - [ ] Registered in SwarmRouter, selectable as SwarmType
 - [ ] 3 working examples demonstrating different use cases
 - [ ] No regressions in existing tests
+
+## Tasks Created
+- [ ] 001.md - DecompositionEngine — LLM-based task splitting (parallel: true)
+- [ ] 002.md - ContextShardingManager — Per-sub-agent context isolation (parallel: true)
+- [ ] 003.md - CriticalPathScheduler — Execution ordering and parallel grouping (parallel: true)
+- [ ] 004.md - ResultAggregator — Output merging and contradiction detection (parallel: true)
+- [ ] 005.md - Decomposition and synthesis prompts (parallel: true)
+- [ ] 006.md - PARLOrchestrator — Main orchestration class (parallel: false, depends: 001-005)
+- [ ] 007.md - SwarmRouter integration — Register as new SwarmType (parallel: false, depends: 006)
+- [ ] 008.md - Examples — basic_research, deep_analysis, code_review (parallel: true, depends: 006-007)
+- [ ] 009.md - Tests — Unit tests for each new module (parallel: true, depends: 006-007)
+- [ ] 010.md - README update — Document new capability (parallel: false, depends: 006-008)
+
+Total tasks: 10
+Parallel tasks: 5 (001-005 can all run simultaneously)
+Sequential tasks: 5 (006-010 have dependencies)
+Estimated total effort: 57-81 hours
 
 ## Reviewed Decisions
 

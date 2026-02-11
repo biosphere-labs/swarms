@@ -45,6 +45,55 @@
   </a>
 </p>
 
+---
+
+## Fork: biosphere-labs/swarms — PARL Orchestrator
+
+This is a fork of [kyegomez/swarms](https://github.com/kyegomez/swarms) adding a **PARL-inspired dynamic orchestration layer** — cloning the core behavior of [Kimi K2.5's Agent Swarm](https://arxiv.org/html/2602.02276v1) on top of the existing framework.
+
+### What We're Adding
+
+| Module | Purpose |
+|--------|---------|
+| `PARLOrchestrator` | Main swarm type — dynamically decomposes tasks into parallel sub-agent work via LLM |
+| `DecompositionEngine` | Analyzes tasks and produces sub-task graphs (parallel groups + dependencies) |
+| `CriticalPathScheduler` | Orders execution to minimize wall-clock time, not just maximize parallelism |
+| `ContextShardingManager` | Isolates context per sub-agent — only structured results flow back to orchestrator |
+| `ResultAggregator` | Merges sub-agent outputs, flags contradictions, identifies gaps |
+
+### How It Works
+
+```
+Task → DecompositionEngine → CriticalPathScheduler → Parallel Sub-Agents → ResultAggregator → Output
+           (LLM splits         (orders by              (isolated context,     (merge, flag
+            into sub-tasks)     critical path)          concurrent execution)  contradictions)
+```
+
+Key differences from existing swarm types (ConcurrentWorkflow, HierarchicalSwarm, etc.):
+- **Dynamic decomposition** — the LLM decides how to split work, not a predefined workflow
+- **Context sharding** — sub-agents get focused context slices, preventing cross-contamination
+- **Critical-path scheduling** — optimizes wall-clock latency via `CriticalSteps = sum(S_main + max(S_sub))`
+- **Anti-collapse heuristics** — prevents defaulting to single-agent (serial collapse) or spawning empty agents (spurious parallelism)
+
+### What We're NOT Changing
+
+The existing framework is used as-is: Agent class, LiteLLM wrapper, tool system, all existing swarm types, tests, and examples. All additions are new files under `swarms/structs/` and `swarms/prompts/`.
+
+### Reference
+
+- [Kimi K2.5 Technical Report](https://arxiv.org/html/2602.02276v1) — PARL architecture and training methodology
+- [Unofficial PARL Implementation](https://github.com/The-Swarm-Corporation/PARL) — Reward function and CriticalSteps metric
+- [Kimi System Prompts (extracted)](https://github.com/dnnyngyen/kimi-k2.5-prompts-tools) — Agent architecture analysis
+
+### Upstream Sync
+
+```bash
+git fetch upstream
+git merge upstream/master
+```
+
+---
+
 ## ✨ Features
 
 Swarms delivers a comprehensive, enterprise-grade multi-agent infrastructure platform designed for production-scale deployments and seamless integration with existing systems. [Learn more about the swarms feature set here](https://docs.swarms.world/en/latest/swarms/features/)

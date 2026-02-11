@@ -12,6 +12,10 @@ dataframe/
 target/
 Cargo.lock
 .claude/
+!.claude/project.yaml
+
+# Workflow archives (optional - uncomment to ignore)
+# workflow/**/.archived/
 .pytest_cache
 databases
 static/generated

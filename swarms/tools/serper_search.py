@@ -4,14 +4,47 @@ Serper.dev web search tool for use with swarms Agent.
 Wraps the Serper Google Search API as a simple callable that can be
 passed to Agent(tools=[serper_search]).
 
-Requires: SERPER_API_KEY environment variable.
+Supports multiple API keys for round-robin rotation:
+  - SERPER_API_KEYS: Comma-separated list of keys (preferred)
+  - SERPER_API_KEY: Single key fallback
 """
 
+import itertools
 import json
 import os
-from typing import Optional
+import threading
 
 import httpx
+
+# Module-level key rotation pool (initialized on first call)
+_serper_key_cycle = None
+_serper_key_lock = threading.Lock()
+_serper_initialized = False
+
+
+def _get_serper_key() -> str:
+    """Get the next Serper API key from the round-robin pool."""
+    global _serper_key_cycle, _serper_initialized
+
+    if not _serper_initialized:
+        with _serper_key_lock:
+            if not _serper_initialized:
+                keys = []
+                env_keys = os.environ.get("SERPER_API_KEYS", "")
+                if env_keys:
+                    keys = [k.strip() for k in env_keys.split(",") if k.strip()]
+                if not keys:
+                    single = os.environ.get("SERPER_API_KEY", "")
+                    if single:
+                        keys = [single]
+                if keys:
+                    _serper_key_cycle = itertools.cycle(keys)
+                _serper_initialized = True
+
+    if _serper_key_cycle is None:
+        return ""
+    with _serper_key_lock:
+        return next(_serper_key_cycle)
 
 
 def serper_search(
@@ -30,9 +63,9 @@ def serper_search(
     Returns:
         str: JSON string containing search results with titles, links, and snippets.
     """
-    api_key = os.environ.get("SERPER_API_KEY")
+    api_key = _get_serper_key()
     if not api_key:
-        return json.dumps({"error": "SERPER_API_KEY environment variable not set"})
+        return json.dumps({"error": "Set SERPER_API_KEYS or SERPER_API_KEY env var"})
 
     url = f"https://google.serper.dev/{search_type}"
     headers = {

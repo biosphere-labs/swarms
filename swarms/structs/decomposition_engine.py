@@ -7,7 +7,7 @@ to prevent degenerate decomposition strategies.
 """
 
 import json
-from typing import List, Optional, Dict, Any
+from typing import Callable, List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from swarms.utils.loguru_logger import initialize_logger
 
@@ -75,6 +75,7 @@ class DecompositionEngine:
         temperature: float = 0.7,
         max_subtasks: int = 20,
         min_subtasks_for_parallel: int = 2,
+        api_key_provider: Optional[Callable] = None,
     ):
         """
         Initialize the DecompositionEngine.
@@ -84,11 +85,13 @@ class DecompositionEngine:
             temperature: Temperature for LLM generation (default: 0.7 for balanced creativity)
             max_subtasks: Maximum number of sub-tasks to generate (prevents over-decomposition)
             min_subtasks_for_parallel: Minimum sub-tasks required to consider parallelization
+            api_key_provider: Optional callable that returns the next API key (for round-robin)
         """
         self.model = model
         self.temperature = temperature
         self.max_subtasks = max_subtasks
         self.min_subtasks_for_parallel = min_subtasks_for_parallel
+        self._api_key_provider = api_key_provider
 
         logger.info(
             f"DecompositionEngine initialized with model={model}, "
@@ -270,63 +273,104 @@ Respond with ONLY the JSON object, no additional text.
 """
         return prompt
 
-    def _call_llm_for_decomposition(self, prompt: str) -> Optional[Dict[str, Any]]:
+    def _call_llm_for_decomposition(
+        self, prompt: str, max_retries: int = 3
+    ) -> Optional[Dict[str, Any]]:
         """
-        Call LLM to perform task decomposition.
+        Call LLM to perform task decomposition with retry and backoff.
+
+        Retries on transient errors (rate limits, model busy) with exponential
+        backoff. Non-transient errors (import, JSON parse) fail immediately.
 
         Args:
             prompt: Decomposition prompt
+            max_retries: Maximum number of retry attempts (default 3)
 
         Returns:
-            Parsed JSON response or None if call failed
+            Parsed JSON response or None if all attempts failed
         """
+        import time as _time
+
         try:
             import litellm
-
-            logger.info(f"Calling LLM for decomposition (model={self.model})")
-
-            response = litellm.completion(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a task decomposition expert. Respond only with valid JSON."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=self.temperature,
-            )
-
-            content = response.choices[0].message.content
-            logger.info(f"LLM response received ({len(content)} chars)")
-
-            # Strip markdown code fences if present (e.g. ```json ... ```)
-            stripped = content.strip()
-            if stripped.startswith("```"):
-                lines = stripped.split("\n")
-                # Remove first line (```json or ```) and last line (```)
-                lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                stripped = "\n".join(lines)
-
-            # Parse JSON response
-            parsed = json.loads(stripped)
-            return parsed
-
         except ImportError:
             logger.error("litellm not available - install with: pip install litellm")
             return None
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response as JSON: {e}")
-            logger.debug(f"Response content: {content}")
-            return None
-        except Exception as e:
-            logger.error(f"LLM call failed: {e}")
-            return None
+
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(
+                    f"Calling LLM for decomposition (model={self.model}, attempt={attempt}/{max_retries})"
+                )
+
+                # Get API key from provider if available (round-robin)
+                extra_kwargs = {}
+                if self._api_key_provider:
+                    key = self._api_key_provider()
+                    if key:
+                        extra_kwargs["api_key"] = key
+
+                response = litellm.completion(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a task decomposition expert. Respond only with valid JSON."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=self.temperature,
+                    **extra_kwargs,
+                )
+
+                content = response.choices[0].message.content
+                logger.info(f"LLM response received ({len(content)} chars)")
+
+                # Strip markdown code fences if present (e.g. ```json ... ```)
+                stripped = content.strip()
+                if stripped.startswith("```"):
+                    lines = stripped.split("\n")
+                    # Remove first line (```json or ```) and last line (```)
+                    lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    stripped = "\n".join(lines)
+
+                # Parse JSON response
+                parsed = json.loads(stripped)
+                return parsed
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response as JSON: {e}")
+                logger.debug(f"Response content: {content}")
+                return None  # Don't retry parse errors
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                is_transient = any(
+                    keyword in error_str
+                    for keyword in ["rate", "busy", "retry", "timeout", "429", "503"]
+                )
+                if is_transient and attempt < max_retries:
+                    wait_time = 2 ** attempt  # 2s, 4s, 8s
+                    logger.warning(
+                        f"Transient error on attempt {attempt}: {e}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    _time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"LLM call failed (attempt {attempt}): {e}")
+                    if attempt < max_retries and is_transient:
+                        continue
+                    return None
+
+        logger.error(f"All {max_retries} decomposition attempts failed. Last error: {last_error}")
+        return None
 
     def _validate_and_fix_graph(self, raw_graph: Dict[str, Any], task: str) -> SubTaskGraph:
         """

@@ -12,7 +12,9 @@ Implements the full PARL pipeline:
 Inherits from BaseSwarm for clean framework integration.
 """
 
+import itertools
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -128,13 +130,16 @@ class PARLOrchestrator(BaseSwarm):
     Args:
         name: Name of the orchestrator instance
         description: Description of the orchestrator
-        orchestrator_model: Model for decomposition and synthesis. Env: PARL_ORCHESTRATOR_MODEL (default: gpt-4o-mini)
-        sub_agent_model: Model for sub-agents and aggregation. Env: PARL_SUB_AGENT_MODEL (default: gpt-4o-mini)
+        orchestrator_model: Model for decomposition. Env: PARL_ORCHESTRATOR_MODEL (default: gpt-4o-mini)
+        sub_agent_model: Model for sub-agents. Env: PARL_SUB_AGENT_MODEL (default: gpt-4o-mini)
+        synthesis_model: Model for aggregation/synthesis. Env: PARL_SYNTHESIS_MODEL (defaults to orchestrator_model)
         max_parallel: Maximum concurrent sub-agents. Env: PARL_MAX_PARALLEL (default: 10)
         max_iterations: Gap-fill iterations. Env: PARL_MAX_ITERATIONS (default: 2)
         timeout: Overall timeout in seconds. Env: PARL_TIMEOUT (default: 300)
         sub_agent_timeout: Per sub-agent timeout in seconds. Env: PARL_SUB_AGENT_TIMEOUT (default: 120)
         token_budget: Total token budget. Env: PARL_TOKEN_BUDGET (default: 100000)
+        api_keys: Optional list of API keys for round-robin rotation. Env: PARL_API_KEYS (comma-separated).
+            Distributes load across multiple keys to avoid rate limits.
         agents: Optional pre-configured agents (passed to BaseSwarm)
         *args: Additional arguments passed to BaseSwarm
         **kwargs: Additional keyword arguments passed to BaseSwarm
@@ -164,12 +169,14 @@ class PARLOrchestrator(BaseSwarm):
         description: str = "PARL-inspired dynamic orchestrator with parallel sub-agent execution and context sharding",
         orchestrator_model: Optional[str] = None,
         sub_agent_model: Optional[str] = None,
+        synthesis_model: Optional[str] = None,
         max_parallel: Optional[int] = None,
         max_iterations: Optional[int] = None,
         timeout: Optional[int] = None,
         sub_agent_timeout: Optional[int] = None,
         token_budget: Optional[int] = None,
         tools: Optional[List[Callable]] = None,
+        api_keys: Optional[List[str]] = None,
         agents: Optional[List[Agent]] = None,
         *args,
         **kwargs,
@@ -206,6 +213,11 @@ class PARLOrchestrator(BaseSwarm):
             sub_agent_model
             or os.environ.get("PARL_SUB_AGENT_MODEL", "gpt-4o-mini")
         )
+        self.synthesis_model = (
+            synthesis_model
+            or os.environ.get("PARL_SYNTHESIS_MODEL")
+            or self.orchestrator_model
+        )
         self.max_parallel = (
             max_parallel
             if max_parallel is not None
@@ -235,33 +247,58 @@ class PARLOrchestrator(BaseSwarm):
         # Tools to pass to sub-agents (e.g., web search)
         self.tools = tools or []
 
+        # API key pool for round-robin rotation across LLM calls.
+        # Distributes load to avoid per-key rate limits.
+        # Env: PARL_API_KEYS (comma-separated list of keys)
+        key_list = api_keys
+        if not key_list:
+            env_keys = os.environ.get("PARL_API_KEYS", "")
+            if env_keys:
+                key_list = [k.strip() for k in env_keys.split(",") if k.strip()]
+        if key_list:
+            self._key_cycle = itertools.cycle(key_list)
+            self._key_lock = threading.Lock()
+            logger.info(f"API key pool: {len(key_list)} keys (round-robin)")
+        else:
+            self._key_cycle = None
+            self._key_lock = None
+
         # Token tracking
         self._tokens_used = 0
 
-        # Initialize component modules
+        # Initialize component modules (use resolved self.xxx values, not raw params)
         self._decomposition_engine = DecompositionEngine(
-            model=orchestrator_model,
+            model=self.orchestrator_model,
             temperature=0.7,
             max_subtasks=20,
             min_subtasks_for_parallel=2,
+            api_key_provider=self._next_api_key if self._key_cycle else None,
         )
         self._scheduler = CriticalPathScheduler()
         self._context_manager = ContextShardingManager(
             max_context_tokens=4000,
-            model_name=orchestrator_model,
+            model_name=self.orchestrator_model,
         )
         self._aggregator = ResultAggregator(
-            synthesis_model=sub_agent_model,
+            synthesis_model=self.synthesis_model,
             max_tokens=4000,
             temperature=0.3,
+            api_key_provider=self._next_api_key if self._key_cycle else None,
         )
 
         logger.info(
             f"PARLOrchestrator initialized: orchestrator_model={self.orchestrator_model}, "
-            f"sub_agent_model={self.sub_agent_model}, max_parallel={self.max_parallel}, "
-            f"max_iterations={self.max_iterations}, timeout={self.timeout}s, "
-            f"token_budget={self.token_budget}"
+            f"sub_agent_model={self.sub_agent_model}, synthesis_model={self.synthesis_model}, "
+            f"max_parallel={self.max_parallel}, max_iterations={self.max_iterations}, "
+            f"timeout={self.timeout}s, token_budget={self.token_budget}"
         )
+
+    def _next_api_key(self) -> Optional[str]:
+        """Get the next API key from the round-robin pool. Thread-safe."""
+        if self._key_cycle is None:
+            return None
+        with self._key_lock:
+            return next(self._key_cycle)
 
     def run(self, task: str, *args, **kwargs) -> str:
         """
@@ -430,20 +467,29 @@ class PARLOrchestrator(BaseSwarm):
         Returns:
             str: The agent's output
         """
-        logger.info("Executing single-agent fallback")
+        # With tools, the agent needs multiple loops: call tools, process
+        # results, optionally call more tools. Without tools, 1 loop suffices.
+        max_loops = 5 if self.tools else 1
+        logger.info(
+            f"Executing single-agent fallback (max_loops={max_loops}, "
+            f"tools={[t.__name__ for t in self.tools] if self.tools else None})"
+        )
         try:
             agent = Agent(
                 agent_name="parl-single-agent",
                 system_prompt=(
-                    "You are a focused agent executing a task. "
-                    "Provide a clear, comprehensive response."
+                    "You are a thorough research agent. Complete the full task systematically. "
+                    "Use all available tools to gather information. Make multiple searches "
+                    "to cover different aspects of the task. Do not stop after one round — "
+                    "continue until you have addressed every part of the request."
                 ),
                 model_name=self.orchestrator_model,
-                max_loops=1,
+                max_loops=max_loops,
                 max_tokens=8192,
-                output_type="str",
+                output_type="final",
                 verbose=False,
                 tools=self.tools if self.tools else None,
+                llm_api_key=self._next_api_key(),
             )
             result = agent.run(task=task)
             return str(result) if result is not None else ""
@@ -628,11 +674,10 @@ class PARLOrchestrator(BaseSwarm):
                     f"\n\n## Output Format\nProvide your output in {shard.output_format} format."
                 )
 
-            # When tools are available, agents need multiple loops:
-            # loop 1: LLM decides to call tool(s)
-            # loop 2: LLM receives tool results and produces final answer
-            # loop 3+: additional tool calls if needed
-            max_loops = 3 if self.tools else 1
+            # Sub-agents run a single loop: the LLM receives the task + tool
+            # results in one pass and produces its answer. With models like
+            # Qwen2.5-72B, additional loops return None responses, wasting time.
+            max_loops = 1
 
             agent = Agent(
                 agent_name=agent_name,
@@ -640,9 +685,10 @@ class PARLOrchestrator(BaseSwarm):
                 model_name=self.sub_agent_model,
                 max_loops=max_loops,
                 max_tokens=8192,
-                output_type="str",
+                output_type="final",
                 verbose=False,
                 tools=self.tools if self.tools else None,
+                llm_api_key=self._next_api_key(),
             )
 
             output = agent.run(task=shard.task_description)

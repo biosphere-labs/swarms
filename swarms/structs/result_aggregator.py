@@ -13,7 +13,7 @@ Key features:
 - Contradictions are NEVER silently resolved (always surfaced explicitly)
 """
 
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from litellm import completion
 from swarms.utils.loguru_logger import initialize_logger
@@ -141,6 +141,7 @@ class ResultAggregator:
         synthesis_model: str = "gpt-4o-mini",
         max_tokens: int = 4000,
         temperature: float = 0.3,
+        api_key_provider: Optional[Callable] = None,
     ):
         """
         Initialize the ResultAggregator.
@@ -149,15 +150,33 @@ class ResultAggregator:
             synthesis_model: LLM model to use for synthesis (default: gpt-4o-mini for cost efficiency)
             max_tokens: Maximum tokens for LLM responses
             temperature: Temperature for LLM calls (lower = more deterministic)
+            api_key_provider: Optional callable that returns the next API key (for round-robin)
         """
         self.synthesis_model = synthesis_model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self._api_key_provider = api_key_provider
 
         logger.info(
             f"Initialized ResultAggregator with model={synthesis_model}, "
             f"max_tokens={max_tokens}, temperature={temperature}"
         )
+
+    def _call_llm(self, prompt: str) -> str:
+        """Call LLM with optional round-robin API key."""
+        kwargs = {}
+        if self._api_key_provider:
+            key = self._api_key_provider()
+            if key:
+                kwargs["api_key"] = key
+        response = completion(
+            model=self.synthesis_model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            **kwargs,
+        )
+        return response.choices[0].message.content.strip()
 
     def aggregate(
         self,
@@ -255,14 +274,7 @@ class ResultAggregator:
         )
 
         try:
-            response = completion(
-                model=self.synthesis_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
 
             # Check for no contradictions
             if "NO_CONTRADICTIONS" in content:
@@ -328,14 +340,7 @@ class ResultAggregator:
         )
 
         try:
-            response = completion(
-                model=self.synthesis_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
-
-            content = response.choices[0].message.content.strip()
+            content = self._call_llm(prompt)
 
             # Check for no gaps
             if "NO_GAPS" in content:
@@ -403,14 +408,7 @@ class ResultAggregator:
             prompt += "\nInclude these contradictions explicitly in your synthesis."
 
         try:
-            response = completion(
-                model=self.synthesis_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
-
-            synthesized = response.choices[0].message.content.strip()
+            synthesized = self._call_llm(prompt)
             logger.info(f"Synthesis complete ({len(synthesized)} chars)")
             return synthesized
 

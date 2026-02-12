@@ -1,9 +1,12 @@
 ---
 name: parl-orchestrator
-status: backlog
+status: completed
+verified: true
+verified_at: 2026-02-12T10:59:36Z
 created: 2026-02-11T20:29:39Z
-updated: 2026-02-11T21:01:30Z
-progress: 0%
+updated: 2026-02-12T11:40:12Z
+completed: 2026-02-12T11:40:12Z
+progress: 100%
 prd: none
 github: https://github.com/biosphere-labs/swarms/issues/1
 ---

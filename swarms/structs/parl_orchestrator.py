@@ -15,7 +15,7 @@ Inherits from BaseSwarm for clean framework integration.
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from swarms.structs.agent import Agent
 from swarms.structs.base_swarm import BaseSwarm
@@ -169,6 +169,7 @@ class PARLOrchestrator(BaseSwarm):
         timeout: Optional[int] = None,
         sub_agent_timeout: Optional[int] = None,
         token_budget: Optional[int] = None,
+        tools: Optional[List[Callable]] = None,
         agents: Optional[List[Agent]] = None,
         *args,
         **kwargs,
@@ -230,6 +231,9 @@ class PARLOrchestrator(BaseSwarm):
             if token_budget is not None
             else int(os.environ.get("PARL_TOKEN_BUDGET", "100000"))
         )
+
+        # Tools to pass to sub-agents (e.g., web search)
+        self.tools = tools or []
 
         # Token tracking
         self._tokens_used = 0
@@ -439,6 +443,7 @@ class PARLOrchestrator(BaseSwarm):
                 max_tokens=8192,
                 output_type="str",
                 verbose=False,
+                tools=self.tools if self.tools else None,
             )
             result = agent.run(task=task)
             return str(result) if result is not None else ""
@@ -623,14 +628,21 @@ class PARLOrchestrator(BaseSwarm):
                     f"\n\n## Output Format\nProvide your output in {shard.output_format} format."
                 )
 
+            # When tools are available, agents need multiple loops:
+            # loop 1: LLM decides to call tool(s)
+            # loop 2: LLM receives tool results and produces final answer
+            # loop 3+: additional tool calls if needed
+            max_loops = 3 if self.tools else 1
+
             agent = Agent(
                 agent_name=agent_name,
                 system_prompt=system_prompt,
                 model_name=self.sub_agent_model,
-                max_loops=1,
+                max_loops=max_loops,
                 max_tokens=8192,
                 output_type="str",
                 verbose=False,
+                tools=self.tools if self.tools else None,
             )
 
             output = agent.run(task=shard.task_description)

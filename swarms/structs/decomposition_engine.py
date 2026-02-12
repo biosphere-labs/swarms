@@ -298,14 +298,23 @@ Respond with ONLY the JSON object, no additional text.
                     }
                 ],
                 temperature=self.temperature,
-                response_format={"type": "json_object"}  # Request JSON output
             )
 
             content = response.choices[0].message.content
             logger.info(f"LLM response received ({len(content)} chars)")
 
+            # Strip markdown code fences if present (e.g. ```json ... ```)
+            stripped = content.strip()
+            if stripped.startswith("```"):
+                lines = stripped.split("\n")
+                # Remove first line (```json or ```) and last line (```)
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                stripped = "\n".join(lines)
+
             # Parse JSON response
-            parsed = json.loads(content)
+            parsed = json.loads(stripped)
             return parsed
 
         except ImportError:

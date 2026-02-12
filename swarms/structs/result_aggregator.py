@@ -269,8 +269,16 @@ class ResultAggregator:
                 logger.info("No contradictions detected")
                 return []
 
-            # Try to parse as JSON list
+            # Strip markdown code fences if present
             import json
+            if content.startswith("```"):
+                lines = content.split("\n")
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            # Try to parse as JSON list
             try:
                 contradictions = json.loads(content)
                 if isinstance(contradictions, list):
@@ -334,8 +342,16 @@ class ResultAggregator:
                 logger.info("No coverage gaps detected")
                 return []
 
-            # Try to parse as JSON list
+            # Strip markdown code fences if present
             import json
+            if content.startswith("```"):
+                lines = content.split("\n")
+                lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+
+            # Try to parse as JSON list
             try:
                 gaps = json.loads(content)
                 if isinstance(gaps, list):

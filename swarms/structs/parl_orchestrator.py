@@ -201,7 +201,7 @@ class PARLOrchestrator(BaseSwarm):
             model_name=orchestrator_model,
         )
         self._aggregator = ResultAggregator(
-            synthesis_model=orchestrator_model,
+            synthesis_model=sub_agent_model,
             max_tokens=4000,
             temperature=0.3,
         )
@@ -390,7 +390,7 @@ class PARLOrchestrator(BaseSwarm):
                 ),
                 model_name=self.orchestrator_model,
                 max_loops=1,
-                max_tokens=4096,
+                max_tokens=8192,
                 output_type="str",
                 verbose=False,
             )
@@ -425,14 +425,10 @@ class PARLOrchestrator(BaseSwarm):
         results: List[StructuredResult] = []
         max_workers = min(len(cohort.task_ids), self.max_parallel)
 
-        # Remaining time for timeout
-        elapsed = time.time() - start_time
-        remaining_time = max(0, self.timeout - elapsed)
-        effective_timeout = min(self.sub_agent_timeout, remaining_time)
-
-        if effective_timeout <= 0:
-            logger.warning("No time remaining for cohort execution")
-            return results
+        # Use sub_agent_timeout for cohort execution.
+        # The overall self.timeout is checked at the stage loop level;
+        # once we've committed to a cohort, give it its full sub_agent_timeout.
+        effective_timeout = self.sub_agent_timeout
 
         # Prepare agent configurations for each task in the cohort
         agent_configs: List[Dict[str, Any]] = []
@@ -492,40 +488,59 @@ class PARLOrchestrator(BaseSwarm):
                 )
                 future_to_config[future] = config
 
-            for future in as_completed(future_to_config, timeout=effective_timeout):
-                config = future_to_config[future]
-                task_id = config["task_id"]
-                try:
-                    result = future.result(timeout=0)
-                    if result is not None:
-                        results.append(result)
-                        logger.info(
-                            f"Sub-agent {task_id} completed "
-                            f"(confidence={result.confidence:.2f})"
+            try:
+                for future in as_completed(future_to_config, timeout=effective_timeout):
+                    config = future_to_config[future]
+                    task_id = config["task_id"]
+                    try:
+                        result = future.result(timeout=0)
+                        if result is not None:
+                            results.append(result)
+                            logger.info(
+                                f"Sub-agent {task_id} completed "
+                                f"(confidence={result.confidence:.2f})"
+                            )
+                    except Exception as e:
+                        logger.error(f"Sub-agent {task_id} failed: {e}")
+                        results.append(
+                            self._context_manager.collect_result(
+                                agent_id=f"parl-sub-{task_id}",
+                                sub_task_id=task_id,
+                                result=f"[ERROR] Sub-agent failed: {e}",
+                                confidence=0.0,
+                                metadata={"error": str(e)},
+                            )
                         )
-                except TimeoutError:
-                    logger.warning(f"Sub-agent {task_id} timed out")
-                    # Collect a failure result
-                    results.append(
-                        self._context_manager.collect_result(
-                            agent_id=f"parl-sub-{task_id}",
-                            sub_task_id=task_id,
-                            result=f"[TIMEOUT] Sub-agent timed out after {effective_timeout:.0f}s",
-                            confidence=0.0,
-                            metadata={"error": "timeout", "timeout_seconds": effective_timeout},
+            except TimeoutError:
+                # as_completed raises TimeoutError when not all futures finish in time
+                # Collect results from any completed futures, mark rest as timed out
+                for future, config in future_to_config.items():
+                    task_id = config["task_id"]
+                    if future.done():
+                        try:
+                            result = future.result(timeout=0)
+                            if result is not None and not any(
+                                r.sub_task_id == task_id for r in results
+                            ):
+                                results.append(result)
+                                logger.info(
+                                    f"Sub-agent {task_id} completed late "
+                                    f"(confidence={result.confidence:.2f})"
+                                )
+                        except Exception:
+                            pass  # Already handled or truly failed
+                    elif not any(r.sub_task_id == task_id for r in results):
+                        logger.warning(f"Sub-agent {task_id} timed out")
+                        future.cancel()
+                        results.append(
+                            self._context_manager.collect_result(
+                                agent_id=f"parl-sub-{task_id}",
+                                sub_task_id=task_id,
+                                result=f"[TIMEOUT] Sub-agent timed out after {effective_timeout:.0f}s",
+                                confidence=0.0,
+                                metadata={"error": "timeout", "timeout_seconds": effective_timeout},
+                            )
                         )
-                    )
-                except Exception as e:
-                    logger.error(f"Sub-agent {task_id} failed: {e}")
-                    results.append(
-                        self._context_manager.collect_result(
-                            agent_id=f"parl-sub-{task_id}",
-                            sub_task_id=task_id,
-                            result=f"[ERROR] Sub-agent failed: {e}",
-                            confidence=0.0,
-                            metadata={"error": str(e)},
-                        )
-                    )
 
         return results
 
@@ -567,7 +582,7 @@ class PARLOrchestrator(BaseSwarm):
                 system_prompt=system_prompt,
                 model_name=self.sub_agent_model,
                 max_loops=1,
-                max_tokens=4096,
+                max_tokens=8192,
                 output_type="str",
                 verbose=False,
             )

@@ -12,6 +12,7 @@ Implements the full PARL pipeline:
 Inherits from BaseSwarm for clean framework integration.
 """
 
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from typing import Any, Dict, List, Optional, Tuple
@@ -121,21 +122,25 @@ class PARLOrchestrator(BaseSwarm):
     Inherits from BaseSwarm for framework integration. Creates sub-agents
     dynamically at execution time rather than requiring pre-configured agents.
 
+    All parameters can also be set via environment variables. Explicit constructor
+    arguments take priority over environment variables, which take priority over defaults.
+
     Args:
         name: Name of the orchestrator instance
         description: Description of the orchestrator
-        orchestrator_model: Model for decomposition and synthesis (should be strong)
-        sub_agent_model: Model for sub-agents (can be cheap/fast)
-        max_parallel: Maximum number of concurrent sub-agents
-        max_iterations: Maximum gap-fill iterations
-        timeout: Overall timeout in seconds
-        sub_agent_timeout: Per sub-agent timeout in seconds
-        token_budget: Total token budget across all sub-agents
+        orchestrator_model: Model for decomposition and synthesis. Env: PARL_ORCHESTRATOR_MODEL (default: gpt-4o-mini)
+        sub_agent_model: Model for sub-agents and aggregation. Env: PARL_SUB_AGENT_MODEL (default: gpt-4o-mini)
+        max_parallel: Maximum concurrent sub-agents. Env: PARL_MAX_PARALLEL (default: 10)
+        max_iterations: Gap-fill iterations. Env: PARL_MAX_ITERATIONS (default: 2)
+        timeout: Overall timeout in seconds. Env: PARL_TIMEOUT (default: 300)
+        sub_agent_timeout: Per sub-agent timeout in seconds. Env: PARL_SUB_AGENT_TIMEOUT (default: 120)
+        token_budget: Total token budget. Env: PARL_TOKEN_BUDGET (default: 100000)
         agents: Optional pre-configured agents (passed to BaseSwarm)
         *args: Additional arguments passed to BaseSwarm
         **kwargs: Additional keyword arguments passed to BaseSwarm
 
     Example:
+        >>> # Via constructor arguments:
         >>> orchestrator = PARLOrchestrator(
         ...     orchestrator_model="gpt-4o-mini",
         ...     sub_agent_model="gpt-4o-mini",
@@ -145,19 +150,25 @@ class PARLOrchestrator(BaseSwarm):
         ...     "Research competitor Acme Corp across funding, reviews, pricing, and team"
         ... )
         >>> print(result)
+
+        >>> # Or via environment variables (no code changes needed):
+        >>> # export PARL_ORCHESTRATOR_MODEL=deepinfra/Qwen/Qwen3-235B-A22B
+        >>> # export PARL_SUB_AGENT_MODEL=deepinfra/Qwen/Qwen2.5-72B-Instruct
+        >>> orchestrator = PARLOrchestrator()  # picks up env vars
+        >>> result = orchestrator.run("...")
     """
 
     def __init__(
         self,
         name: str = "PARLOrchestrator",
         description: str = "PARL-inspired dynamic orchestrator with parallel sub-agent execution and context sharding",
-        orchestrator_model: str = "gpt-4o-mini",
-        sub_agent_model: str = "gpt-4o-mini",
-        max_parallel: int = 10,
-        max_iterations: int = 2,
-        timeout: int = 300,
-        sub_agent_timeout: int = 120,
-        token_budget: int = 100000,
+        orchestrator_model: Optional[str] = None,
+        sub_agent_model: Optional[str] = None,
+        max_parallel: Optional[int] = None,
+        max_iterations: Optional[int] = None,
+        timeout: Optional[int] = None,
+        sub_agent_timeout: Optional[int] = None,
+        token_budget: Optional[int] = None,
         agents: Optional[List[Agent]] = None,
         *args,
         **kwargs,
@@ -177,13 +188,48 @@ class PARLOrchestrator(BaseSwarm):
             **kwargs,
         )
 
-        self.orchestrator_model = orchestrator_model
-        self.sub_agent_model = sub_agent_model
-        self.max_parallel = max_parallel
-        self.max_iterations = max_iterations
-        self.timeout = timeout
-        self.sub_agent_timeout = sub_agent_timeout
-        self.token_budget = token_budget
+        # Resolve configuration: explicit argument > environment variable > default.
+        # Environment variables:
+        #   PARL_ORCHESTRATOR_MODEL  — model for decomposition (default: gpt-4o-mini)
+        #   PARL_SUB_AGENT_MODEL    — model for sub-agents and aggregation (default: gpt-4o-mini)
+        #   PARL_MAX_PARALLEL       — max concurrent sub-agents (default: 10)
+        #   PARL_MAX_ITERATIONS     — gap-fill iterations (default: 2)
+        #   PARL_TIMEOUT            — overall timeout in seconds (default: 300)
+        #   PARL_SUB_AGENT_TIMEOUT  — per sub-agent timeout in seconds (default: 120)
+        #   PARL_TOKEN_BUDGET       — total token budget (default: 100000)
+        self.orchestrator_model = (
+            orchestrator_model
+            or os.environ.get("PARL_ORCHESTRATOR_MODEL", "gpt-4o-mini")
+        )
+        self.sub_agent_model = (
+            sub_agent_model
+            or os.environ.get("PARL_SUB_AGENT_MODEL", "gpt-4o-mini")
+        )
+        self.max_parallel = (
+            max_parallel
+            if max_parallel is not None
+            else int(os.environ.get("PARL_MAX_PARALLEL", "10"))
+        )
+        self.max_iterations = (
+            max_iterations
+            if max_iterations is not None
+            else int(os.environ.get("PARL_MAX_ITERATIONS", "2"))
+        )
+        self.timeout = (
+            timeout
+            if timeout is not None
+            else int(os.environ.get("PARL_TIMEOUT", "300"))
+        )
+        self.sub_agent_timeout = (
+            sub_agent_timeout
+            if sub_agent_timeout is not None
+            else int(os.environ.get("PARL_SUB_AGENT_TIMEOUT", "120"))
+        )
+        self.token_budget = (
+            token_budget
+            if token_budget is not None
+            else int(os.environ.get("PARL_TOKEN_BUDGET", "100000"))
+        )
 
         # Token tracking
         self._tokens_used = 0
@@ -207,10 +253,10 @@ class PARLOrchestrator(BaseSwarm):
         )
 
         logger.info(
-            f"PARLOrchestrator initialized: orchestrator_model={orchestrator_model}, "
-            f"sub_agent_model={sub_agent_model}, max_parallel={max_parallel}, "
-            f"max_iterations={max_iterations}, timeout={timeout}s, "
-            f"token_budget={token_budget}"
+            f"PARLOrchestrator initialized: orchestrator_model={self.orchestrator_model}, "
+            f"sub_agent_model={self.sub_agent_model}, max_parallel={self.max_parallel}, "
+            f"max_iterations={self.max_iterations}, timeout={self.timeout}s, "
+            f"token_budget={self.token_budget}"
         )
 
     def run(self, task: str, *args, **kwargs) -> str:

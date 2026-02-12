@@ -59,11 +59,12 @@ def check_all_model_max_tokens(
 def get_single_model_max_tokens(model_name: str) -> int:
     """
     Get the maximum token limit for a single model.
+    Returns 16000 as default for models not yet in litellm's registry.
     """
     try:
         return get_max_tokens(model_name)
     except Exception:
-        raise ValueError(f"Model {model_name} not found in litellm")
+        return 16000
 
 
 if __name__ == "__main__":

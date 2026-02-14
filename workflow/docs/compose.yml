@@ -1,0 +1,11 @@
+ervices:
+  agent-zero:
+    image: agent0ai/agent-zero:latest  # Or specify a version if needed
+    container_name: agent-zero
+    environment:
+      OPENAI_API_KEY: uoM5PyBcqFM6Bzwa1M4Vrc5q06xIkA8E
+    ports:
+      - "50001:80"  # Maps container port 80 to host port 50001; adjust if desired
+    volumes:
+      - ./home/justin/Documents/dev/workspaces/swarm/:/a0/usr  # Mounts your local 'local_data' folder to /a0/usr in the container
+    restart: unless-stopped  # Optional: Auto-restart on failure

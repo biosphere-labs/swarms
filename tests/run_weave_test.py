@@ -115,8 +115,10 @@ def main():
     print(f"Completed in {elapsed:.1f}s ({elapsed/60:.1f} min)")
     print(f"{'='*60}\n")
 
-    # Save output
-    output_path = Path("/tmp/weave-test-output.md")
+    # Save output to gitignored project directory (not /tmp)
+    output_dir = Path(__file__).resolve().parent / "output"
+    output_dir.mkdir(exist_ok=True)
+    output_path = output_dir / "weave-test-output.md"
     output_path.write_text(result)
     print(f"Output saved to: {output_path}")
     print(f"Output length: {len(result)} chars")

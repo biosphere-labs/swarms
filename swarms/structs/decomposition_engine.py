@@ -9,6 +9,7 @@ to prevent degenerate decomposition strategies.
 import json
 from typing import Callable, List, Optional, Dict, Any
 from pydantic import BaseModel, Field
+from swarms.structs.llm_backend import LLMBackend, LiteLLMBackend
 from swarms.utils.loguru_logger import initialize_logger
 
 logger = initialize_logger(log_folder="decomposition_engine")
@@ -76,6 +77,7 @@ class DecompositionEngine:
         max_subtasks: int = 20,
         min_subtasks_for_parallel: int = 2,
         api_key_provider: Optional[Callable] = None,
+        llm_backend: Optional[LLMBackend] = None,
     ):
         """
         Initialize the DecompositionEngine.
@@ -86,16 +88,19 @@ class DecompositionEngine:
             max_subtasks: Maximum number of sub-tasks to generate (prevents over-decomposition)
             min_subtasks_for_parallel: Minimum sub-tasks required to consider parallelization
             api_key_provider: Optional callable that returns the next API key (for round-robin)
+            llm_backend: Optional LLM backend to use. Defaults to LiteLLMBackend(model).
         """
         self.model = model
         self.temperature = temperature
         self.max_subtasks = max_subtasks
         self.min_subtasks_for_parallel = min_subtasks_for_parallel
         self._api_key_provider = api_key_provider
+        self._llm_backend = llm_backend or LiteLLMBackend(model=model)
 
         logger.info(
             f"DecompositionEngine initialized with model={model}, "
-            f"max_subtasks={max_subtasks}, temperature={temperature}"
+            f"max_subtasks={max_subtasks}, temperature={temperature}, "
+            f"backend={type(self._llm_backend).__name__}"
         )
 
     def _is_task_too_simple(self, task: str) -> bool:
@@ -291,43 +296,26 @@ Respond with ONLY the JSON object, no additional text.
         """
         import time as _time
 
-        try:
-            import litellm
-        except ImportError:
-            logger.error("litellm not available - install with: pip install litellm")
-            return None
-
         last_error = None
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(
-                    f"Calling LLM for decomposition (model={self.model}, attempt={attempt}/{max_retries})"
+                    f"Calling LLM for decomposition (backend={type(self._llm_backend).__name__}, "
+                    f"attempt={attempt}/{max_retries})"
                 )
 
                 # Get API key from provider if available (round-robin)
-                extra_kwargs = {}
+                api_key = None
                 if self._api_key_provider:
-                    key = self._api_key_provider()
-                    if key:
-                        extra_kwargs["api_key"] = key
+                    api_key = self._api_key_provider()
 
-                response = litellm.completion(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a task decomposition expert. Respond only with valid JSON."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
+                content = self._llm_backend.call(
+                    system_prompt="You are a task decomposition expert. Respond only with valid JSON.",
+                    user_prompt=prompt,
                     temperature=self.temperature,
-                    **extra_kwargs,
+                    api_key=api_key,
                 )
 
-                content = response.choices[0].message.content
                 logger.info(f"LLM response received ({len(content)} chars)")
 
                 # Strip markdown code fences if present (e.g. ```json ... ```)

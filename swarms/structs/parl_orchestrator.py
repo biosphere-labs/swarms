@@ -38,6 +38,8 @@ from swarms.structs.decomposition_engine import (
     SubTask as DecompositionSubTask,
     SubTaskGraph as DecompositionSubTaskGraph,
 )
+from swarms.structs.fact_check_debate import FactCheckDebate
+from swarms.structs.llm_backend import create_llm_backend
 from swarms.structs.result_aggregator import (
     AggregatedOutput,
     ResultAggregator,
@@ -138,6 +140,13 @@ class PARLOrchestrator(BaseSwarm):
         timeout: Overall timeout in seconds. Env: PARL_TIMEOUT (default: 300)
         sub_agent_timeout: Per sub-agent timeout in seconds. Env: PARL_SUB_AGENT_TIMEOUT (default: 120)
         token_budget: Total token budget. Env: PARL_TOKEN_BUDGET (default: 100000)
+        decomposition_backend: Backend for decomposition LLM calls. Env: PARL_DECOMPOSITION_BACKEND
+            (default: "litellm", option: "claude-code")
+        synthesis_backend: Backend for synthesis LLM calls. Env: PARL_SYNTHESIS_BACKEND
+            (default: "litellm", option: "claude-code")
+        fact_check: Enable paired fact-checking per sub-agent. Env: PARL_FACT_CHECK (default: False)
+        fact_check_model: Model for fact-checker agents. Env: PARL_FACT_CHECK_MODEL
+            (defaults to sub_agent_model)
         api_keys: Optional list of API keys for round-robin rotation. Env: PARL_API_KEYS (comma-separated).
             Distributes load across multiple keys to avoid rate limits.
         agents: Optional pre-configured agents (passed to BaseSwarm)
@@ -176,6 +185,10 @@ class PARLOrchestrator(BaseSwarm):
         sub_agent_timeout: Optional[int] = None,
         token_budget: Optional[int] = None,
         tools: Optional[List[Callable]] = None,
+        decomposition_backend: Optional[str] = None,
+        synthesis_backend: Optional[str] = None,
+        fact_check: Optional[bool] = None,
+        fact_check_model: Optional[str] = None,
         api_keys: Optional[List[str]] = None,
         agents: Optional[List[Agent]] = None,
         *args,
@@ -247,6 +260,28 @@ class PARLOrchestrator(BaseSwarm):
         # Tools to pass to sub-agents (e.g., web search)
         self.tools = tools or []
 
+        # Resolve backend configuration
+        self.decomposition_backend = (
+            decomposition_backend
+            or os.environ.get("PARL_DECOMPOSITION_BACKEND", "litellm")
+        )
+        self.synthesis_backend = (
+            synthesis_backend
+            or os.environ.get("PARL_SYNTHESIS_BACKEND", "litellm")
+        )
+
+        # Resolve fact-checking configuration
+        self.fact_check = (
+            fact_check
+            if fact_check is not None
+            else os.environ.get("PARL_FACT_CHECK", "").lower() in ("true", "1", "yes")
+        )
+        self.fact_check_model = (
+            fact_check_model
+            or os.environ.get("PARL_FACT_CHECK_MODEL")
+            or self.sub_agent_model
+        )
+
         # API key pool for round-robin rotation across LLM calls.
         # Distributes load to avoid per-key rate limits.
         # Env: PARL_API_KEYS (comma-separated list of keys)
@@ -266,6 +301,18 @@ class PARLOrchestrator(BaseSwarm):
         # Token tracking
         self._tokens_used = 0
 
+        # Create LLM backends
+        decomp_backend = create_llm_backend(
+            backend_type=self.decomposition_backend,
+            model=self.orchestrator_model,
+            timeout=self.timeout,
+        )
+        synth_backend = create_llm_backend(
+            backend_type=self.synthesis_backend,
+            model=self.synthesis_model,
+            timeout=self.timeout,
+        )
+
         # Initialize component modules (use resolved self.xxx values, not raw params)
         self._decomposition_engine = DecompositionEngine(
             model=self.orchestrator_model,
@@ -273,6 +320,7 @@ class PARLOrchestrator(BaseSwarm):
             max_subtasks=20,
             min_subtasks_for_parallel=2,
             api_key_provider=self._next_api_key if self._key_cycle else None,
+            llm_backend=decomp_backend,
         )
         self._scheduler = CriticalPathScheduler()
         self._context_manager = ContextShardingManager(
@@ -284,11 +332,15 @@ class PARLOrchestrator(BaseSwarm):
             max_tokens=4000,
             temperature=0.3,
             api_key_provider=self._next_api_key if self._key_cycle else None,
+            llm_backend=synth_backend,
         )
 
         logger.info(
             f"PARLOrchestrator initialized: orchestrator_model={self.orchestrator_model}, "
             f"sub_agent_model={self.sub_agent_model}, synthesis_model={self.synthesis_model}, "
+            f"decomposition_backend={self.decomposition_backend}, "
+            f"synthesis_backend={self.synthesis_backend}, "
+            f"fact_check={self.fact_check}, fact_check_model={self.fact_check_model}, "
             f"max_parallel={self.max_parallel}, max_iterations={self.max_iterations}, "
             f"timeout={self.timeout}s, token_budget={self.token_budget}"
         )
@@ -691,8 +743,29 @@ class PARLOrchestrator(BaseSwarm):
                 llm_api_key=self._next_api_key(),
             )
 
-            output = agent.run(task=shard.task_description)
-            output_str = str(output) if output is not None else ""
+            raw_output = agent.run(task=shard.task_description)
+            output_str = str(raw_output) if raw_output is not None else ""
+
+            # Multi-round fact-checking debate: researcher vs fact-checker vs judge
+            if self.fact_check and output_str:
+                try:
+                    logger.info(f"Starting fact-check debate for {task_id}")
+                    debate = FactCheckDebate(
+                        model_name=self.fact_check_model,
+                        max_loops=2,  # 2 rounds of debate
+                        tools=self.tools if self.tools else None,
+                        api_key_provider=self._next_api_key if self._key_cycle else None,
+                        verbose=False,
+                    )
+                    verified = debate.verify(research_output=output_str)
+                    if verified:
+                        output_str = verified
+                        logger.info(f"Fact-check debate complete for {task_id}")
+                except Exception as e:
+                    logger.warning(
+                        f"Fact-check debate failed for {task_id}: {e}. "
+                        "Using unverified output."
+                    )
 
             execution_time = time.time() - execution_start
 

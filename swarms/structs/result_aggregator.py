@@ -15,7 +15,7 @@ Key features:
 
 from typing import Callable, List, Dict, Any, Optional
 from pydantic import BaseModel, Field
-from litellm import completion
+from swarms.structs.llm_backend import LLMBackend, LiteLLMBackend
 from swarms.utils.loguru_logger import initialize_logger
 
 logger = initialize_logger(log_folder="result_aggregator")
@@ -142,6 +142,7 @@ class ResultAggregator:
         max_tokens: int = 4000,
         temperature: float = 0.3,
         api_key_provider: Optional[Callable] = None,
+        llm_backend: Optional[LLMBackend] = None,
     ):
         """
         Initialize the ResultAggregator.
@@ -151,32 +152,32 @@ class ResultAggregator:
             max_tokens: Maximum tokens for LLM responses
             temperature: Temperature for LLM calls (lower = more deterministic)
             api_key_provider: Optional callable that returns the next API key (for round-robin)
+            llm_backend: Optional LLM backend to use. Defaults to LiteLLMBackend(synthesis_model).
         """
         self.synthesis_model = synthesis_model
         self.max_tokens = max_tokens
         self.temperature = temperature
         self._api_key_provider = api_key_provider
+        self._llm_backend = llm_backend or LiteLLMBackend(model=synthesis_model)
 
         logger.info(
             f"Initialized ResultAggregator with model={synthesis_model}, "
-            f"max_tokens={max_tokens}, temperature={temperature}"
+            f"max_tokens={max_tokens}, temperature={temperature}, "
+            f"backend={type(self._llm_backend).__name__}"
         )
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM with optional round-robin API key."""
-        kwargs = {}
+        api_key = None
         if self._api_key_provider:
-            key = self._api_key_provider()
-            if key:
-                kwargs["api_key"] = key
-        response = completion(
-            model=self.synthesis_model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=self.max_tokens,
+            api_key = self._api_key_provider()
+        return self._llm_backend.call(
+            system_prompt="You are an expert analyst.",
+            user_prompt=prompt,
             temperature=self.temperature,
-            **kwargs,
+            max_tokens=self.max_tokens,
+            api_key=api_key,
         )
-        return response.choices[0].message.content.strip()
 
     def aggregate(
         self,

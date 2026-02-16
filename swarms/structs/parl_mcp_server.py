@@ -40,14 +40,14 @@ MCP Client Configuration (add to MCP client config):
     }
 """
 
+import asyncio
 import itertools
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from swarms.structs.agent import Agent
 from swarms.structs.llm_backend import LiteLLMBackend
 from swarms.structs.parl_orchestrator import PARLOrchestrator
@@ -72,7 +72,7 @@ mcp = FastMCP("PARLOrchestrator")
         "across funding, team, pricing, and reviews')."
     ),
 )
-def parl_execute(
+async def parl_execute(
     task: str,
     orchestrator_model: Optional[str] = None,
     sub_agent_model: Optional[str] = None,
@@ -81,6 +81,7 @@ def parl_execute(
     max_parallel: Optional[int] = None,
     max_iterations: Optional[int] = None,
     timeout: Optional[int] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Execute a task using the PARL orchestrator.
@@ -102,6 +103,7 @@ def parl_execute(
             Defaults to PARL_MAX_ITERATIONS env var or 2.
         timeout: Optional override for overall timeout in seconds.
             Defaults to PARL_TIMEOUT env var or 300.
+        ctx: MCP Context for progress reporting.
 
     Returns:
         str: The synthesized answer from the orchestrator, including any
@@ -113,6 +115,10 @@ def parl_execute(
         ...     fact_check=True
         ... )
     """
+    if ctx:
+        await ctx.info("Initializing PARL orchestrator...")
+        await ctx.report_progress(0, 3)
+
     # Create the orchestrator with optional overrides
     # Environment variables are automatically handled by PARLOrchestrator.__init__
     orchestrator = PARLOrchestrator(
@@ -126,8 +132,16 @@ def parl_execute(
         tools=[serper_search],  # Provide web search capability
     )
 
-    # Execute the task
-    result = orchestrator.run(task=task)
+    if ctx:
+        await ctx.info("Decomposing task and executing sub-agents...")
+        await ctx.report_progress(1, 3)
+
+    # Execute the task (blocking — run in thread to keep event loop alive)
+    result = await asyncio.to_thread(orchestrator.run, task=task)
+
+    if ctx:
+        await ctx.info("Task complete.")
+        await ctx.report_progress(3, 3)
 
     return result
 
@@ -221,12 +235,13 @@ Structure your output with clear sections per topic, not per reviewer."""
         '{"name": "Financial Reviewer", "instruction": "Scrutinize projections", "model": "deepinfra/deepseek-ai/DeepSeek-V3.2"}]'
     ),
 )
-def parl_review(
+async def parl_review(
     document: str,
     personas: str,
     synthesis_prompt: Optional[str] = None,
     fact_check: Optional[bool] = None,
     timeout: Optional[int] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Review a document from multiple expert perspectives in parallel.
@@ -243,6 +258,7 @@ def parl_review(
         synthesis_prompt: Optional custom instructions for the synthesis step.
         fact_check: Enable fact-check debate per reviewer (slower but more accurate).
         timeout: Overall timeout in seconds (default: 300).
+        ctx: MCP Context for progress reporting.
 
     Returns:
         str: Synthesized multi-perspective review with agreements, disagreements,
@@ -284,6 +300,10 @@ def parl_review(
         f"parl_review: {len(persona_list)} reviewers across {len(models_used)} model(s), "
         f"fact_check={use_fact_check}, models={models_used}"
     )
+
+    if ctx:
+        await ctx.info(f"Starting review with {len(persona_list)} reviewers across {len(models_used)} model(s)...")
+        await ctx.report_progress(0, len(persona_list) + 1)  # +1 for synthesis
 
     # --- Execute reviewers in parallel ---
     def run_reviewer(persona: dict) -> StructuredResult:
@@ -349,35 +369,52 @@ def parl_review(
             },
         )
 
+    # Run reviewers concurrently with asyncio for progress reporting
     results: List[StructuredResult] = []
-    max_workers = min(len(persona_list), max_parallel)
+    total_reviewers = len(persona_list)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(run_reviewer, p): p["name"]
-            for p in persona_list
-        }
+    async def run_reviewer_async(persona: dict) -> StructuredResult:
+        return await asyncio.to_thread(run_reviewer, persona)
 
-        for future in as_completed(futures, timeout=effective_timeout):
-            name = futures[future]
-            try:
-                result = future.result(timeout=30)
-                results.append(result)
-                logger.info(f"Reviewer '{name}' completed ({len(result.output)} chars)")
-            except Exception as e:
-                logger.error(f"Reviewer '{name}' failed: {e}")
-                results.append(StructuredResult(
-                    agent_id=f"reviewer-{name.lower().replace(' ', '-')}",
-                    sub_task_id=name,
-                    output=f"[Review failed: {e}]",
-                    confidence=0.0,
-                    metadata={"persona": name, "error": str(e)},
-                ))
+    # Create tasks with semaphore for max_parallel limit
+    sem = asyncio.Semaphore(min(total_reviewers, max_parallel))
+
+    async def run_with_limit(persona: dict) -> StructuredResult:
+        async with sem:
+            return await run_reviewer_async(persona)
+
+    tasks = [run_with_limit(p) for p in persona_list]
+    completed = 0
+
+    for coro in asyncio.as_completed(tasks):
+        try:
+            result = await asyncio.wait_for(coro, timeout=effective_timeout)
+            results.append(result)
+            completed += 1
+            logger.info(f"Reviewer '{result.sub_task_id}' completed ({len(result.output)} chars)")
+            if ctx:
+                await ctx.report_progress(completed, total_reviewers + 1)
+                await ctx.info(f"Reviewer {completed}/{total_reviewers} done: {result.sub_task_id}")
+        except Exception as e:
+            completed += 1
+            logger.error(f"Reviewer failed: {e}")
+            results.append(StructuredResult(
+                agent_id="reviewer-unknown",
+                sub_task_id="unknown",
+                output=f"[Review failed: {e}]",
+                confidence=0.0,
+                metadata={"error": str(e)},
+            ))
+            if ctx:
+                await ctx.report_progress(completed, total_reviewers + 1)
 
     if not results:
         return "Error: All reviewers failed. Check API keys and model configuration."
 
     # --- Synthesize all reviews ---
+    if ctx:
+        await ctx.info(f"Synthesizing {len(results)} reviews...")
+
     aggregator = ResultAggregator(
         model=synthesis_model,
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
@@ -390,10 +427,15 @@ def parl_review(
         f"{document[:500]}{'...' if len(document) > 500 else ''}"
     )
 
-    aggregated = aggregator.aggregate(
+    aggregated = await asyncio.to_thread(
+        aggregator.aggregate,
         results=results,
         original_task=original_task,
     )
+
+    if ctx:
+        await ctx.report_progress(total_reviewers + 1, total_reviewers + 1)
+        await ctx.info("Review complete.")
 
     # Format output
     elapsed = time.time() - start_time
@@ -468,13 +510,14 @@ Structure your output with these sections:
         '{"name": "Audience Calibrator", "instruction": "Check tone for CEOs"}]'
     ),
 )
-def parl_smart_review(
+async def parl_smart_review(
     document: str,
     personas: str,
     auto_assign_models: Optional[bool] = True,
     fact_check_rounds: Optional[int] = 2,
     synthesis_prompt: Optional[str] = None,
     timeout: Optional[int] = None,
+    ctx: Context = None,
 ) -> str:
     """
     Enhanced review with dynamic model selection and cross-model fact-checking.
@@ -528,14 +571,24 @@ def parl_smart_review(
 
     key_cycle = _build_key_cycle()
 
+    # Total steps: model assignment + reviewers + fact-check + synthesis
+    total_steps = len(persona_list) + 3  # rough estimate for progress bar
+
+    if ctx:
+        await ctx.info(f"Smart review: {len(persona_list)} reviewers, {fc_rounds} fact-check rounds")
+        await ctx.report_progress(0, total_steps)
+
     # --- Step 1: Auto-assign models to personas ---
     if auto_assign_models:
+        if ctx:
+            await ctx.info("Fetching model catalog for auto-assignment...")
         api_key = _next_api_key(key_cycle)
         if api_key:
             logger.info("Smart review: fetching model catalog for auto-assignment...")
-            available_models = fetch_available_models(api_key)
+            available_models = await asyncio.to_thread(fetch_available_models, api_key)
             if available_models:
-                persona_list = assign_models_to_personas(
+                persona_list = await asyncio.to_thread(
+                    assign_models_to_personas,
                     personas=persona_list,
                     available_models=available_models,
                     orchestrator_model=orchestrator_model,
@@ -605,30 +658,47 @@ def parl_smart_review(
             },
         )
 
+    # Run reviewers concurrently with asyncio for progress reporting
     results: List[StructuredResult] = []
-    max_workers = min(len(persona_list), max_parallel)
+    total_reviewers = len(persona_list)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(run_reviewer, p): p["name"]
-            for p in persona_list
-        }
+    if ctx:
+        await ctx.info(f"Executing {total_reviewers} reviewers in parallel...")
+        await ctx.report_progress(1, total_steps)
 
-        for future in as_completed(futures, timeout=effective_timeout):
-            name = futures[future]
-            try:
-                result = future.result(timeout=60)
-                results.append(result)
-                logger.info(f"Reviewer '{name}' completed ({len(result.output)} chars)")
-            except Exception as e:
-                logger.error(f"Reviewer '{name}' failed: {e}")
-                results.append(StructuredResult(
-                    agent_id=f"reviewer-{name.lower().replace(' ', '-')}",
-                    sub_task_id=name,
-                    output=f"[Review failed: {e}]",
-                    confidence=0.0,
-                    metadata={"persona": name, "error": str(e)},
-                ))
+    async def run_reviewer_async(persona: dict) -> StructuredResult:
+        return await asyncio.to_thread(run_reviewer, persona)
+
+    sem = asyncio.Semaphore(min(total_reviewers, max_parallel))
+
+    async def run_with_limit(persona: dict) -> StructuredResult:
+        async with sem:
+            return await run_reviewer_async(persona)
+
+    tasks = [run_with_limit(p) for p in persona_list]
+    completed = 0
+
+    for coro in asyncio.as_completed(tasks):
+        try:
+            result = await asyncio.wait_for(coro, timeout=effective_timeout)
+            results.append(result)
+            completed += 1
+            logger.info(f"Reviewer '{result.sub_task_id}' completed ({len(result.output)} chars)")
+            if ctx:
+                await ctx.report_progress(1 + completed, total_steps)
+                await ctx.info(f"Reviewer {completed}/{total_reviewers} done: {result.sub_task_id}")
+        except Exception as e:
+            completed += 1
+            logger.error(f"Reviewer failed: {e}")
+            results.append(StructuredResult(
+                agent_id="reviewer-unknown",
+                sub_task_id="unknown",
+                output=f"[Review failed: {e}]",
+                confidence=0.0,
+                metadata={"error": str(e)},
+            ))
+            if ctx:
+                await ctx.report_progress(1 + completed, total_steps)
 
     if not results:
         return "Error: All reviewers failed. Check API keys and model configuration."
@@ -636,6 +706,8 @@ def parl_smart_review(
     # --- Step 3: Cross-model fact-checking ---
     fact_check_section = ""
     if fc_rounds > 0:
+        if ctx:
+            await ctx.info(f"Running {fc_rounds} rounds of cross-model fact-checking...")
         # Collect unique models used by reviewers for the fact-check pool
         reviewer_models = list({
             r.metadata.get("model", sub_agent_model)
@@ -656,11 +728,13 @@ def parl_smart_review(
                 max_parallel=max_parallel,
             )
             try:
-                fc_report = fact_checker.verify_reviews(results)
+                fc_report = await asyncio.to_thread(fact_checker.verify_reviews, results)
                 fact_check_section = (
                     f"Fact-check results ({fc_report.rounds_completed} rounds):\n"
                     f"{fc_report.summary()}"
                 )
+                if ctx:
+                    await ctx.info("Fact-checking complete.")
             except Exception as e:
                 logger.error(f"Fact-checking failed: {e}")
                 fact_check_section = f"Fact-checking failed: {e}"
@@ -669,6 +743,9 @@ def parl_smart_review(
             fact_check_section = "Cross-model fact-check skipped (need 2+ models)"
 
     # --- Step 4: Synthesize with blind spot analysis ---
+    if ctx:
+        await ctx.info("Synthesizing reviews with blind spot analysis...")
+        await ctx.report_progress(total_steps - 1, total_steps)
     model_map_str = "\n".join(
         f"- {name}: {info['model'].split('/')[-1]} ({info['reason']})"
         for name, info in model_map.items()
@@ -691,10 +768,15 @@ def parl_smart_review(
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
     )
 
-    aggregated = aggregator.aggregate(
+    aggregated = await asyncio.to_thread(
+        aggregator.aggregate,
         results=results,
         original_task=synth_prompt,
     )
+
+    if ctx:
+        await ctx.report_progress(total_steps, total_steps)
+        await ctx.info("Smart review complete.")
 
     # --- Format final output ---
     elapsed = time.time() - start_time

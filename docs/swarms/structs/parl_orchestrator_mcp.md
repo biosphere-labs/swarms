@@ -1,11 +1,13 @@
 # PARL Orchestrator MCP Server
 
-The PARL orchestrator exposes two modes of operation as MCP tools:
+The PARL orchestrator exposes four tools as MCP endpoints:
 
 - **`parl_execute`** — Auto-decomposes a research task into parallel sub-agents, synthesizes results
 - **`parl_review`** — Runs a document through a panel of custom reviewer personas in parallel, synthesizes a multi-angle assessment
+- **`parl_smart_review`** — Enhanced review with automatic model diversity, cross-model fact-checking, and blind spot analysis
+- **`parl_config`** — Returns current server configuration
 
-Both tools run as a single MCP service accessible from Claude Code, Cursor, Windsurf, Claude Desktop, or any MCP-compatible client.
+All tools run as a single MCP service with **async progress streaming** — clients receive real-time status updates as each sub-agent completes, keeping long-running operations visible.
 
 ---
 
@@ -30,8 +32,19 @@ PARL MCP Server (http://localhost:8765/mcp)
     │     ├── Optional: FactCheckDebate per reviewer
     │     └── ResultAggregator → synthesis + disagreement surfacing
     │
+    ├── parl_smart_review
+    │     ├── Auto model assignment from DeepInfra catalog
+    │     ├── N × Reviewer Agent (diverse models auto-selected)
+    │     ├── Iterative cross-model fact-checking (claims verified by different model)
+    │     ├── Blind spot analysis (issues caught by only one model)
+    │     └── ResultAggregator → synthesis + model agreement matrix
+    │
     └── parl_config
           └── Returns current environment configuration
+
+All async tools report progress via MCP Context:
+    ctx.report_progress(current, total)  → numeric progress bar
+    ctx.info("message")                  → human-readable status updates
 ```
 
 ---
@@ -273,6 +286,60 @@ The synthesized output includes:
 
 ---
 
+### `parl_smart_review`
+
+Enhanced multi-model review with automatic model selection, cross-model fact-checking, and blind spot analysis. Models are automatically assigned from the DeepInfra catalog for maximum diversity unless explicitly specified per persona.
+
+**Best for:** High-stakes reviews where you want genuinely diverse perspectives (not just different prompts on the same model), with automated verification that claims are checked by a different model than the one that made them.
+
+**Difference from `parl_review`:** `parl_review` requires you to manually assign models per persona. `parl_smart_review` auto-assigns diverse models, adds iterative cross-model fact-checking, and includes blind spot analysis showing which issues were caught by only one model.
+
+#### Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `document` | string | Yes | -- | Full document text to review |
+| `personas` | string | Yes | -- | JSON array of reviewer personas (same schema as `parl_review`, but `model` is optional and auto-assigned) |
+| `auto_assign_models` | boolean | No | `true` | Auto-assign diverse models from DeepInfra catalog |
+| `fact_check_rounds` | integer | No | `2` | Cross-model fact-check rounds (0 to disable, max 3) |
+| `synthesis_prompt` | string | No | Auto-generated | Custom synthesis instructions |
+| `timeout` | integer | No | env `PARL_TIMEOUT` (300) | Overall timeout in seconds |
+
+#### How Cross-Model Fact-Checking Works
+
+1. All reviewers complete their reviews (each on a different model)
+2. Claims are extracted from each review
+3. Each claim is verified by a **different model** than the one that made it
+4. This repeats for `fact_check_rounds` iterations
+5. Claims that survive cross-model scrutiny are marked as high-confidence
+
+#### Example
+
+```
+Use parl_smart_review to review this pitch deck. Auto-assign models for maximum diversity.
+
+Document: [paste document]
+
+Personas:
+[
+  {"name": "Thesis Stress-Tester", "instruction": "Find logical gaps in the core thesis"},
+  {"name": "Market Analyst", "instruction": "Evaluate market sizing and competitive claims"},
+  {"name": "Financial Reviewer", "instruction": "Scrutinize projections and unit economics"},
+  {"name": "Audience Calibrator", "instruction": "Check tone and clarity for C-suite audience"}
+]
+```
+
+#### Output Structure
+
+- **Synthesized assessment** with model agreement matrix
+- **Blind spot analysis** — issues flagged by only one model (potential unique insight or hallucination)
+- **Fact-check corrections** — claims that failed cross-model verification
+- **Reviewer disagreements** and **coverage gaps**
+
+> **Note:** `parl_smart_review` requires the `swarms.structs.model_selector` and `swarms.structs.iterative_fact_check` modules. These are imported at call time, so the server starts without them — but the tool will fail if they don't exist.
+
+---
+
 ### `parl_config`
 
 Returns the current server configuration. No parameters.
@@ -280,6 +347,44 @@ Returns the current server configuration. No parameters.
 ```
 Use parl_config to show the current PARL orchestrator settings.
 ```
+
+---
+
+## Progress Streaming
+
+All tools are async and use FastMCP's `Context` for real-time progress reporting. This keeps MCP clients informed during long-running operations (which can take 30-120 seconds).
+
+### What Clients Receive
+
+| Method | Purpose | Example |
+|--------|---------|---------|
+| `ctx.report_progress(current, total)` | Numeric progress bar | `3/7` — 3 of 7 reviewers done |
+| `ctx.info(message)` | Human-readable status | `"Reviewer 3/5 done: Market Analyst"` |
+
+### Progress Stages by Tool
+
+**`parl_execute`:**
+1. `0/3` — Initializing orchestrator
+2. `1/3` — Decomposing task and executing sub-agents
+3. `3/3` — Complete
+
+**`parl_review`:**
+1. `0/N+1` — Starting N reviewers
+2. `1/N+1` through `N/N+1` — Each reviewer completion reported individually
+3. `N+1/N+1` — Synthesis complete
+
+**`parl_smart_review`:**
+1. `0/N+3` — Fetching model catalog
+2. `1/N+3` — Executing reviewers
+3. `2/N+3` through `N+1/N+3` — Each reviewer completion
+4. `N+2/N+3` — Cross-model fact-checking
+5. `N+3/N+3` — Synthesis complete
+
+### Client Behavior
+
+- **Claude Code** shows progress in tool output as the tool runs
+- **Cursor/Windsurf** may show progress indicators depending on their MCP implementation
+- Without progress streaming, clients may timeout or show "tool not responding" errors on long operations
 
 ---
 
@@ -451,6 +556,8 @@ Using DeepInfra with recommended models:
 | `swarms/structs/decomposition_engine.py` | Task decomposition via LLM |
 | `swarms/structs/result_aggregator.py` | Result synthesis + contradiction detection |
 | `swarms/structs/fact_check_debate.py` | 3-agent debate fact-checking |
+| `swarms/structs/model_selector.py` | Auto model assignment from DeepInfra catalog (used by smart_review) |
+| `swarms/structs/iterative_fact_check.py` | Cross-model iterative fact-checking (used by smart_review) |
 | `swarms/structs/llm_backend.py` | Pluggable LLM backend (litellm / claude-code) |
 | `swarms/structs/context_sharding.py` | Per-agent context isolation |
 | `swarms/structs/critical_path_scheduler.py` | Execution order optimization |

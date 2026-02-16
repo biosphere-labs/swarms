@@ -416,7 +416,7 @@ async def parl_review(
         await ctx.info(f"Synthesizing {len(results)} reviews...")
 
     aggregator = ResultAggregator(
-        model=synthesis_model,
+        synthesis_model=synthesis_model,
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
     )
 
@@ -546,7 +546,7 @@ async def parl_smart_review(
 
     start_time = time.time()
     effective_timeout = timeout or int(os.environ.get("PARL_TIMEOUT", "300"))
-    fc_rounds = max(0, min(fact_check_rounds or 2, 3))
+    fc_rounds = max(0, min(fact_check_rounds if fact_check_rounds is not None else 2, 3))
 
     # Parse personas
     try:
@@ -722,7 +722,7 @@ async def parl_smart_review(
             fact_checker = IterativeFactCheck(
                 extraction_model=orchestrator_model,
                 available_models=reviewer_models,
-                tools=[serper_search],
+                tools=None,
                 api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
                 max_rounds=fc_rounds,
                 max_parallel=max_parallel,
@@ -764,7 +764,7 @@ async def parl_smart_review(
     )
 
     aggregator = ResultAggregator(
-        model=synthesis_model,
+        synthesis_model=synthesis_model,
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
     )
 

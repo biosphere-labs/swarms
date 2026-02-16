@@ -170,25 +170,97 @@ The orchestrator executes a six-stage pipeline:
 ```
 swarms/structs/
     parl_orchestrator.py        # Main PARLOrchestrator class
+    parl_mcp_server.py          # MCP server with all tools (execute, review, smart_review)
     decomposition_engine.py     # Task analysis and splitting
     critical_path_scheduler.py  # Latency-optimized execution planning
     context_sharding.py         # Per-sub-agent context isolation
     result_aggregator.py        # Output merging and contradiction detection
+    fact_check_debate.py        # 3-agent debate fact-checking
+    llm_backend.py              # Pluggable LLM backend (litellm / claude-code)
 
 swarms/prompts/
     parl_prompts.py             # Decomposition and synthesis prompts
 
-examples/parl_orchestrator/
-    basic_research.py           # Wide search example
-    deep_analysis.py            # Deep reasoning example
-    code_review.py              # Multi-file parallel review
+examples/mcp/servers/
+    parl_server.py              # MCP server launcher with config display
+
+scripts/
+    install-parl-service.sh     # systemd service installer
+    uninstall-parl-service.sh   # systemd service removal
+
+docs/swarms/structs/
+    parl_orchestrator_mcp.md    # Full MCP server documentation
 
 tests/
     test_parl_orchestrator.py
+    test_parl_mcp_server.py     # MCP tool tests
     test_decomposition_engine.py
     test_critical_path_scheduler.py
     test_context_sharding.py
     test_result_aggregator.py
+    test_llm_backend.py         # Backend abstraction tests
+    test_fact_check_debate.py   # Debate module tests
+```
+
+## MCP Server
+
+The orchestrator runs as an MCP server, making all tools available to Claude Code, Cursor, Windsurf, and any MCP-compatible client.
+
+```bash
+# Start the server
+python examples/mcp/servers/parl_server.py
+
+# Or auto-start on login (Linux)
+./scripts/install-parl-service.sh
+
+# Register with Claude Code
+claude mcp add --transport http parl-orchestrator http://localhost:8765/mcp
+```
+
+### Available MCP Tools
+
+| Tool | Purpose |
+|------|---------|
+| **`parl_execute`** | Auto-decompose a task into parallel sub-agents, synthesize results |
+| **`parl_review`** | Review a document from multiple expert personas in parallel, with per-persona model assignment |
+| **`parl_smart_review`** | Enhanced review with auto model diversity, cross-model fact-checking, and blind spot analysis |
+| **`parl_config`** | Show current server configuration |
+
+All tools stream progress via MCP Context — clients see real-time status as each sub-agent completes.
+
+Full documentation: [`docs/swarms/structs/parl_orchestrator_mcp.md`](docs/swarms/structs/parl_orchestrator_mcp.md)
+
+## Additional Modules
+
+Beyond the core orchestrator, this fork adds:
+
+| Module | Purpose |
+|--------|---------|
+| `FactCheckDebate` | 3-agent debate verification (Researcher → Fact-Checker → Judge) |
+| `LiteLLMBackend` | Pluggable LLM backend abstraction with API key rotation |
+| `ResultAggregator` | Synthesis with contradiction detection, gap identification |
+| `serper_search` | Web search tool passed through to sub-agents |
+
+### Fact-Check Debate
+
+Optional per-agent verification where each claim goes through a 3-round debate:
+
+```python
+from swarms.structs.fact_check_debate import FactCheckDebate
+
+debate = FactCheckDebate(model_name="deepinfra/Qwen/Qwen2.5-72B-Instruct")
+verified = debate.verify(research_output="Claims to verify...")
+```
+
+### Multi-Persona Review (Python API)
+
+```python
+from swarms.structs.parl_mcp_server import parl_review
+
+result = await parl_review(
+    document="Your document text...",
+    personas='[{"name": "Market Analyst", "instruction": "Evaluate market claims", "model": "deepinfra/Qwen/Qwen3-235B-A22B"}, {"name": "Skeptic", "instruction": "Find weakest arguments", "model": "deepinfra/deepseek-ai/DeepSeek-V3.2"}]',
+)
 ```
 
 ## What We're NOT Changing

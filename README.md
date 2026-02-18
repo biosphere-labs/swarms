@@ -80,6 +80,20 @@ All parameters can be set three ways (in priority order):
 | `PARL_TIMEOUT` | `300` | Overall orchestration timeout (seconds) |
 | `PARL_SUB_AGENT_TIMEOUT` | `120` | Per sub-agent timeout (seconds) |
 | `PARL_TOKEN_BUDGET` | `100000` | Total token budget across all agents |
+| `PARL_SYNTHESIS_BACKEND` | `litellm` | Backend for synthesis: `litellm` or `claude-code` |
+| `PARL_SYNTHESIS_MODEL` | *(orchestrator)* | Model for synthesis (only used with `litellm` backend) |
+
+### Using Claude Subscription for Synthesis
+
+Set `PARL_SYNTHESIS_BACKEND=claude-code` to run synthesis through your Claude subscription (via `claude -p`) instead of paying per-token through DeepInfra or other providers. Sub-agents still use DeepInfra with cheap models — only the final synthesis step uses Claude.
+
+```bash
+export PARL_SYNTHESIS_BACKEND="claude-code"
+# Sub-agents remain on cheap DeepInfra models
+export PARL_SUB_AGENT_MODEL="deepinfra/Qwen/Qwen2.5-72B-Instruct"
+```
+
+This applies to `parl_execute`, `parl_review`, and `parl_smart_review`.
 
 ### Example: Using DeepInfra with Qwen
 

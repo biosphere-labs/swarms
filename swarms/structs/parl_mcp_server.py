@@ -49,7 +49,7 @@ from typing import List, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 from swarms.structs.agent import Agent
-from swarms.structs.llm_backend import LiteLLMBackend
+from swarms.structs.llm_backend import LiteLLMBackend, create_llm_backend
 from swarms.structs.parl_orchestrator import PARLOrchestrator
 from swarms.structs.result_aggregator import ResultAggregator, StructuredResult
 from swarms.tools.serper_search import serper_search
@@ -421,9 +421,18 @@ async def parl_review(
     if ctx:
         await ctx.info(f"Synthesizing {len(results)} reviews...")
 
+    synthesis_backend_type = os.environ.get("PARL_SYNTHESIS_BACKEND", "litellm")
+    synth_backend = create_llm_backend(
+        backend_type=synthesis_backend_type,
+        model=synthesis_model,
+    )
+    if ctx and synthesis_backend_type == "claude-code":
+        await ctx.info("Using Claude subscription for synthesis (claude-code backend)")
+
     aggregator = ResultAggregator(
         synthesis_model=synthesis_model,
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
+        llm_backend=synth_backend,
     )
 
     # Use custom synthesis prompt if provided
@@ -457,9 +466,10 @@ async def parl_review(
         for g in aggregated.gaps:
             output_parts.append(f"- {g}")
 
+    synth_label = "claude-code (subscription)" if synthesis_backend_type == "claude-code" else synthesis_model
     output_parts.append(
         f"\n\n---\n*Review completed in {elapsed:.1f}s by {len(results)} reviewers "
-        f"(model: {sub_agent_model}, synthesis: {synthesis_model})*"
+        f"(model: {sub_agent_model}, synthesis: {synth_label})*"
     )
 
     return "\n".join(output_parts)
@@ -773,9 +783,18 @@ async def parl_smart_review(
         fact_check_section=fact_check_section or "No fact-checking performed.",
     )
 
+    synthesis_backend_type = os.environ.get("PARL_SYNTHESIS_BACKEND", "litellm")
+    synth_backend = create_llm_backend(
+        backend_type=synthesis_backend_type,
+        model=synthesis_model,
+    )
+    if ctx and synthesis_backend_type == "claude-code":
+        await ctx.info("Using Claude subscription for synthesis (claude-code backend)")
+
     aggregator = ResultAggregator(
         synthesis_model=synthesis_model,
         api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
+        llm_backend=synth_backend,
     )
 
     aggregated = await asyncio.to_thread(
@@ -810,10 +829,11 @@ async def parl_smart_review(
     for name, info in model_map.items():
         output_parts.append(f"- **{name}**: {info['model'].split('/')[-1]} — {info['reason']}")
 
+    synth_label = "claude-code (subscription)" if synthesis_backend_type == "claude-code" else synthesis_model
     output_parts.append(
         f"\n\n---\n*Smart review completed in {elapsed:.1f}s by {len(results)} reviewers "
         f"across {len(models_used)} models, {fc_rounds} fact-check rounds "
-        f"(synthesis: {synthesis_model})*"
+        f"(synthesis: {synth_label})*"
     )
 
     return "\n".join(output_parts)

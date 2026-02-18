@@ -128,12 +128,15 @@ class ClaudeCodeBackend:
             # Build environment: clear ANTHROPIC_API_KEY to force subscription
             env = {**os.environ, "ANTHROPIC_API_KEY": ""}
 
-            # Spawn: cat tempfile | claude -p --output-format text
+            # Spawn: claude -p (non-interactive pipe mode)
+            # --dangerously-skip-permissions avoids hanging on tool
+            # permission prompts if Claude attempts tool use during synthesis
             proc = subprocess.Popen(
                 [
                     "claude",
                     "-p",
                     "--output-format", "text",
+                    "--dangerously-skip-permissions",
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

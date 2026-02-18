@@ -1212,6 +1212,9 @@ class LiteLLM:
             if self.base_url is not None:
                 completion_params["base_url"] = self.base_url
 
+            if self.api_key is not None:
+                completion_params["api_key"] = self.api_key
+
             if self.response_format is not None:
                 completion_params["response_format"] = (
                     self.response_format

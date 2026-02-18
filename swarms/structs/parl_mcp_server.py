@@ -182,11 +182,13 @@ def parl_config() -> str:
 # --- API key rotation helper ---
 
 def _build_key_cycle():
-    """Build an itertools.cycle from PARL_API_KEYS if available."""
-    raw = os.environ.get("PARL_API_KEYS", "")
+    """Build an itertools.cycle from PARL_API_KEYS or DEEPINFRA_API_KEYS."""
+    raw = os.environ.get("PARL_API_KEYS", "") or os.environ.get("DEEPINFRA_API_KEYS", "")
     keys = [k.strip() for k in raw.split(",") if k.strip()]
     if keys:
+        logger.info(f"Key rotation: {len(keys)} API keys loaded")
         return itertools.cycle(keys)
+    logger.warning("No API keys found in PARL_API_KEYS or DEEPINFRA_API_KEYS")
     return None
 
 _key_cycle_lock = __import__("threading").Lock()
@@ -369,21 +371,25 @@ async def parl_review(
             },
         )
 
-    # Run reviewers concurrently with asyncio for progress reporting
+    # Run reviewers concurrently with staggered launches to avoid thundering herd
     results: List[StructuredResult] = []
     total_reviewers = len(persona_list)
+    stagger_delay = float(os.environ.get("PARL_STAGGER_DELAY", "2.0"))
 
     async def run_reviewer_async(persona: dict) -> StructuredResult:
         return await asyncio.to_thread(run_reviewer, persona)
 
-    # Create tasks with semaphore for max_parallel limit
+    # Create tasks with semaphore for max_parallel limit + staggered start
     sem = asyncio.Semaphore(min(total_reviewers, max_parallel))
 
-    async def run_with_limit(persona: dict) -> StructuredResult:
+    async def run_with_limit(persona: dict, index: int) -> StructuredResult:
+        # Stagger launches to avoid rate-limiting all agents at once
+        if index > 0 and stagger_delay > 0:
+            await asyncio.sleep(index * stagger_delay)
         async with sem:
             return await run_reviewer_async(persona)
 
-    tasks = [run_with_limit(p) for p in persona_list]
+    tasks = [run_with_limit(p, i) for i, p in enumerate(persona_list)]
     completed = 0
 
     for coro in asyncio.as_completed(tasks):
@@ -658,12 +664,13 @@ async def parl_smart_review(
             },
         )
 
-    # Run reviewers concurrently with asyncio for progress reporting
+    # Run reviewers concurrently with staggered launches to avoid thundering herd
     results: List[StructuredResult] = []
     total_reviewers = len(persona_list)
+    stagger_delay = float(os.environ.get("PARL_STAGGER_DELAY", "2.0"))
 
     if ctx:
-        await ctx.info(f"Executing {total_reviewers} reviewers in parallel...")
+        await ctx.info(f"Executing {total_reviewers} reviewers in parallel (stagger={stagger_delay}s)...")
         await ctx.report_progress(1, total_steps)
 
     async def run_reviewer_async(persona: dict) -> StructuredResult:
@@ -671,11 +678,14 @@ async def parl_smart_review(
 
     sem = asyncio.Semaphore(min(total_reviewers, max_parallel))
 
-    async def run_with_limit(persona: dict) -> StructuredResult:
+    async def run_with_limit(persona: dict, index: int) -> StructuredResult:
+        # Stagger launches to avoid rate-limiting all agents at once
+        if index > 0 and stagger_delay > 0:
+            await asyncio.sleep(index * stagger_delay)
         async with sem:
             return await run_reviewer_async(persona)
 
-    tasks = [run_with_limit(p) for p in persona_list]
+    tasks = [run_with_limit(p, i) for i, p in enumerate(persona_list)]
     completed = 0
 
     for coro in asyncio.as_completed(tasks):
@@ -809,6 +819,118 @@ async def parl_smart_review(
     return "\n".join(output_parts)
 
 
+# --- Concept development tool ---
+
+@mcp.tool(
+    name="parl_concept",
+    description=(
+        "Iteratively develop and refine a concept definition through research, "
+        "synthesis, critique, and gap-filling. Takes a rough concept and produces "
+        "a well-researched, comprehensive definition. "
+        "The process: (1) decompose into research directions, (2) parallel web research, "
+        "(3) synthesize a draft definition, (4) critique with a different model to find gaps, "
+        "(5) research the gaps, then loop 3-5 until no gaps remain. "
+        "Example: parl_concept(concept='adaptive knowledge graphs', "
+        "context='in AI-assisted research tools', "
+        "domains='[\"academic research\", \"enterprise KM\"]')"
+    ),
+)
+async def parl_concept(
+    concept: str,
+    context: Optional[str] = None,
+    domains: Optional[str] = None,
+    max_iterations: Optional[int] = None,
+    timeout: Optional[int] = None,
+    ctx: Context = None,
+) -> str:
+    """
+    Iteratively develop a concept definition through research and critique.
+
+    Args:
+        concept: The concept to develop (e.g. "adaptive knowledge graphs").
+        context: Optional context constraining the concept
+            (e.g. "in the context of AI-assisted research tools").
+        domains: Optional JSON array of specific domains to research in
+            (e.g. '["academic research", "enterprise KM"]').
+        max_iterations: Max synthesis-critique-gapfill iterations (default: 3).
+        timeout: Overall timeout in seconds (default: 600).
+        ctx: MCP Context for progress reporting.
+
+    Returns:
+        str: Comprehensive concept definition as markdown.
+    """
+    from swarms.structs.concept_developer import ConceptDeveloper
+
+    effective_timeout = timeout or int(os.environ.get("PARL_TIMEOUT", "600"))
+    iterations = max_iterations or 3
+
+    # Parse domains if provided
+    parsed_domains = None
+    if domains:
+        try:
+            parsed_domains = json.loads(domains)
+            if not isinstance(parsed_domains, list):
+                return "Error: 'domains' must be a JSON array of strings."
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid JSON in 'domains': {e}"
+
+    # Config from environment
+    sub_agent_model = os.environ.get("PARL_SUB_AGENT_MODEL", "gpt-4o-mini")
+    synthesis_model = os.environ.get(
+        "PARL_SYNTHESIS_MODEL",
+        os.environ.get("PARL_ORCHESTRATOR_MODEL", "gpt-4o-mini"),
+    )
+    critique_model = os.environ.get("PARL_CRITIQUE_MODEL", None)
+    stagger_delay = float(os.environ.get("PARL_STAGGER_DELAY", "2.0"))
+    max_parallel = int(os.environ.get("PARL_MAX_PARALLEL", "4"))
+
+    key_cycle = _build_key_cycle()
+
+    if ctx:
+        await ctx.info(
+            f"Starting concept development: '{concept}' "
+            f"(research={sub_agent_model}, synthesis={synthesis_model}, "
+            f"max_iterations={iterations})"
+        )
+        await ctx.report_progress(0, iterations + 2)  # decompose + research + N iterations
+
+    # Bridge sync progress callback to async ctx.info()
+    loop = asyncio.get_running_loop()
+    _progress_step = [0]
+
+    def _progress_cb(phase: str, detail: str = ""):
+        if ctx:
+            msg = f"{phase}: {detail}" if detail else phase
+            _progress_step[0] += 1
+            asyncio.run_coroutine_threadsafe(ctx.info(msg), loop)
+            asyncio.run_coroutine_threadsafe(
+                ctx.report_progress(_progress_step[0], (iterations + 2) * 4), loop
+            )
+
+    developer = ConceptDeveloper(
+        research_model=sub_agent_model,
+        synthesis_model=synthesis_model,
+        critique_model=critique_model,
+        max_iterations=iterations,
+        tools=[serper_search],
+        api_key_provider=lambda: _next_api_key(key_cycle) if key_cycle else None,
+        stagger_delay=stagger_delay,
+        max_parallel=max_parallel,
+        progress_callback=_progress_cb,
+    )
+
+    result = await asyncio.wait_for(
+        asyncio.to_thread(developer.develop, concept, context or "", parsed_domains),
+        timeout=effective_timeout,
+    )
+
+    if ctx:
+        await ctx.report_progress((iterations + 2) * 4, (iterations + 2) * 4)
+        await ctx.info("Concept development complete.")
+
+    return result
+
+
 if __name__ == "__main__":
     # Get port from environment or use default
     port = int(os.environ.get("MCP_PORT", "8765"))
@@ -822,6 +944,7 @@ if __name__ == "__main__":
     print("  - parl_execute:       Research/analysis with auto-decomposition")
     print("  - parl_review:        Multi-persona document review")
     print("  - parl_smart_review:  Enhanced review with auto model selection + fact-check")
+    print("  - parl_concept:       Iterative concept development")
     print("  - parl_config:        View server configuration")
     print(f"\nConnect MCP clients to: http://localhost:{port}/mcp")
     print("\nPress Ctrl+C to stop.\n")

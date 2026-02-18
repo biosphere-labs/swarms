@@ -100,6 +100,39 @@ MODEL_STRENGTH_PRIORS = {
     },
 }
 
+# Known-working models on DeepInfra, verified to actually serve requests.
+# The catalog API lists models that sometimes 404 at runtime (e.g. deprecated
+# Llama variants).  We intersect the catalog with this allowlist so the model
+# selector never assigns a model that will fail.
+KNOWN_WORKING_MODELS = {
+    # DeepSeek family
+    "deepseek-ai/DeepSeek-V3-0324",
+    "deepseek-ai/DeepSeek-R1",
+    "deepseek-ai/DeepSeek-R1-0528",
+    "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+    "deepseek-ai/DeepSeek-R1-Turbo",
+    "deepseek-ai/DeepSeek-R1-0528-Turbo",
+    "deepseek-ai/DeepSeek-V3.2",
+    # Qwen family
+    "Qwen/Qwen3-235B-A22B",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "Qwen/QwQ-32B",
+    "Qwen/Qwen3-32B",
+    "Qwen/Qwen3-30B-A3B",
+    # Llama family
+    "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "meta-llama/Meta-Llama-3.1-70B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct",
+    # Gemini (via DeepInfra)
+    "google/gemini-2.5-flash",
+    "google/gemini-2.0-flash-001",
+    # Others
+    "nvidia/Llama-3.1-Nemotron-70B-Instruct",
+    "microsoft/phi-4",
+    "THUDM/GLM-4-32B-0414",
+}
+
 
 def fetch_available_models(
     api_key: str,
@@ -110,7 +143,9 @@ def fetch_available_models(
     """
     Query DeepInfra model catalog, returning filtered chat/text models.
 
-    Results are cached for 1 hour at module level.
+    Results are cached for 1 hour at module level.  Models are additionally
+    filtered against KNOWN_WORKING_MODELS to avoid assigning models that
+    are listed in the catalog but 404 at runtime.
 
     Args:
         api_key: DeepInfra API key for authentication.
@@ -161,6 +196,9 @@ def fetch_available_models(
         pricing = m.get("pricing", {})
         if not pricing or not pricing.get("cents_per_input_token"):
             continue
+        # Only include models we've verified actually work
+        if m["model_name"] not in KNOWN_WORKING_MODELS:
+            continue
 
         filtered.append({
             "model_name": m["model_name"],
@@ -177,7 +215,7 @@ def fetch_available_models(
         _cached_models = filtered
         _cache_timestamp = time.time()
 
-    logger.info(f"Cached {len(filtered)} available text-generation models")
+    logger.info(f"Cached {len(filtered)} available text-generation models (from {len(KNOWN_WORKING_MODELS)} allowlist)")
     return filtered
 
 

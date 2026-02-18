@@ -1130,6 +1130,12 @@ class Agent:
                 "reasoning_enabled": self.reasoning_enabled,
             }
 
+            # Pass through API key and base URL if provided (e.g. round-robin key rotation)
+            if self.llm_api_key:
+                common_args["api_key"] = self.llm_api_key
+            if self.llm_base_url:
+                common_args["base_url"] = self.llm_base_url
+
             # Initialize tools_list_dictionary, if applicable
             tools_list = []
 
@@ -1880,6 +1886,18 @@ class Agent:
                             f"Attempt {attempt+1}/{self.retry_attempts}: Error generating response in loop {loop_count} for agent '{self.agent_name}': {str(e)} | Traceback: {traceback.format_exc()}"
                         )
                         attempt += 1
+
+                        # Exponential backoff for rate limit errors
+                        if attempt < self.retry_attempts:
+                            err_str = str(e).lower()
+                            if "rate" in err_str or "429" in err_str or "busy" in err_str:
+                                backoff = min(2 ** attempt, 30)
+                                logger.info(
+                                    f"Rate limit detected for '{self.agent_name}', backing off {backoff}s before retry {attempt+1}"
+                                )
+                                time.sleep(backoff)
+                            else:
+                                time.sleep(1)  # Brief pause for non-rate-limit errors
 
                 if not success:
 
